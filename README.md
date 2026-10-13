@@ -41,6 +41,9 @@
 │   │   └── src/views/
 │   └── mcp/                      # MCP server（stdio），把 core 的能力暴露给 AI 助手
 │       └── src/main.rs
+├── packaging/
+│   ├── build-installer.ps1        # 打包脚本：版本从 Cargo.toml 读，可选签名
+│   └── installer.nsi              # NSIS 脚本（必须是带 BOM 的 UTF-8）
 └── tests/fixtures/               # 合成测试内容（不含任何真实博客数据）
 ```
 
@@ -180,25 +183,47 @@ cargo build -p astro-publisher-mcp
 
 ## 安装包（Windows）
 
-`packaging/installer.nsi` 是 NSIS 脚本，产出当前用户级安装包（不需要管理员权限）：
+用打包脚本产出当前用户级安装包（不需要管理员权限）：
 
 ```powershell
-cargo build --release -p astro-publisher -p astro-publisher-core
-makensis /DAPP_VERSION=0.1.0 /DSOURCE_DIR="$PWD\target\release" `
-         /DOUT_FILE="$PWD\dist\astro-publisher-0.1.0-setup.exe" packaging\installer.nsi
+pwsh packaging\build-installer.ps1              # 编译 + 打包
+pwsh packaging\build-installer.ps1 -SkipBuild   # 复用 target\release，只打包
+pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置证书）
 ```
 
-安装内容与行为：
+**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名、exe 内嵌的 `FileVersion`、注册表卸载项里显示的版本永远是同一个。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+
+脚本同时把 `dist/SHA256SUMS.txt` 写成 `<hash>  <文件名>`，供分发的下载方核对。
+
+> `packaging/build-installer.ps1` **刻意只用 ASCII**。含非 ASCII 的 `.ps1` 会按机器的 ANSI 代码页读取，字符串里一个被曲解的字节就会破坏解析（报 `'C' is not recognized as a cmdlet` 之类），与编码环境绑定。同理，`packaging/installer.nsi` 必须是**带 BOM 的 UTF-8**。
+
+### 代码签名（可选）
+
+安装包默认**不签名**，首次运行会有 SmartScreen 提示（「更多信息」→「仍要运行」）。
+
+签名需要**你自己的代码签名证书**——由 CA 在身份核验后签发（OV 或 EV），本地生成不出来，也不是本工具能替你获取的。拿到证书后：
+
+```powershell
+# 证书在用户证书存储里（用其指纹）
+pwsh packaging\build-installer.ps1 -Sign -CertificateThumbprint <SHA1指纹>
+
+# 或者用 .pfx 文件
+pwsh packaging\build-installer.ps1 -Sign -CertificatePath cert.pfx -CertificatePassword <密码>
+```
+
+脚本会 fail-fast：**在编译之前**就检查 `signtool` 与证书参数是否齐备，缺什么直接说明并退出，不会让你等完两分钟的构建才发现签名没配。签名后会自动 `signtool verify /pa` 复核，而不是假定签上了。
+
+EV 证书（或已积累信誉的 OV 证书）才能立刻消除 SmartScreen 警告；新签发的 OV 证书仍需要一段时间的下载量积累，这是证书类型决定的，不是脚本的问题。
+
+### 安装内容与行为
 
 - 装到 `%LOCALAPPDATA%\Programs\astro-publisher`（per-user，全程无 UAC）
 - 开始菜单创建「Astro Publisher」与「卸载 Astro Publisher」
 - 在「应用和功能」登记卸载项（HKCU，含版本、发布者、占用大小、项目主页）
-- 静默安装：`astro-publisher-0.1.0-setup.exe /S`；静默卸载：`uninstall.exe /S`
+- 静默安装：`astro-publisher-<版本>-setup.exe /S`；静默卸载：`uninstall.exe /S`
 - 卸载会删程序与快捷方式，但**保留** `%APPDATA%` 下的配置，重装后你的仓库路径还在
 
-需要本机装有 [NSIS](https://nsis.sourceforge.io/)（`winget install NSIS.NSIS`）。脚本里 `Unicode true` 之外，**`.nsi` 文件本身必须是带 BOM 的 UTF-8**，否则含中文的字符串会报 `Bad text encoding`。
-
-> 安装包未做代码签名，首次运行会有 SmartScreen 提示（「更多信息」→「仍要运行」）。
+需要本机装有 [NSIS](https://nsis.sourceforge.io/)（`winget install NSIS.NSIS`）。脚本会自动在 PATH 及 NSIS 的标准安装位置找 `makensis`，不必自己加 PATH。脚本里 `Unicode true` 之外，**`.nsi` 文件本身必须是带 BOM 的 UTF-8**，否则含中文的字符串会报 `Bad text encoding`。
 
 ## 测试
 
@@ -210,12 +235,12 @@ cargo test
 
 ## 状态
 
-已经可用：文章编辑与预览（含**截图粘贴上传**）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）。
+已经可用：文章编辑与预览（含**截图粘贴上传**）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）、**一键打包脚本**（版本号自动取自 `Cargo.toml`，可选签名）。
 
 尚在完善：
 
-- 安装包代码签名（见「安装包」小节）
-- 版本号统一：目前靠 `makensis /DAPP_VERSION=` 手动传，与 `Cargo.toml` 易漂移
+- 代码签名证书：脚本已接好签名步骤，但证书需要自行向 CA 申请（见「安装包」小节）
+- 本章节暂未纳入 `cargo test`：打包脚本本身没有自动化测试，靠手工跑一次验证
 
 ## 许可
 
