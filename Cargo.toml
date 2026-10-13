@@ -48,6 +48,11 @@ directories = "5"
 # Async / process
 tokio = { version = "1", features = ["process", "io-util", "rt", "macros", "sync", "time", "fs"] }
 
+# Blocking HTTPS for the Luogu problem lookup. Deliberately not `reqwest`: the
+# only calls are two one-shot GETs, and ureq keeps the dependency tree (and the
+# 10-minute GPUI rebuild) small.
+ureq = "3"
+
 # Errors
 anyhow = "1"
 thiserror = "2"

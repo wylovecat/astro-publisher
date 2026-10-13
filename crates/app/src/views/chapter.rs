@@ -13,6 +13,7 @@ use crate::state::Config;
 use astro_publisher_core::books::{self, Book};
 use astro_publisher_core::chapters::{self, ChapterOutcome, ChapterPreview, NewChapter};
 use astro_publisher_core::outline::Outline;
+use astro_publisher_core::problem::{self, ProblemInfo};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, IntoElement, Render, Window, div, px};
 use gpui_component::{
@@ -41,6 +42,14 @@ enum Stage {
     Failed(String),
 }
 
+/// Progress of the Luogu lookup behind the 抓取 button.
+enum Lookup {
+    Idle,
+    Running,
+    Done(Box<ProblemInfo>),
+    Failed(String),
+}
+
 pub struct ChapterWizard {
     config: Config,
     books: Vec<BookChoice>,
@@ -55,6 +64,7 @@ pub struct ChapterWizard {
     check_implies_solution: bool,
     preview: Option<ChapterPreview>,
     stage: Stage,
+    lookup: Lookup,
 }
 
 impl ChapterWizard {
@@ -86,6 +96,7 @@ impl ChapterWizard {
             check_implies_solution: true,
             preview: None,
             stage: Stage::Editing,
+            lookup: Lookup::Idle,
         };
         wizard
     }
@@ -157,6 +168,54 @@ impl ChapterWizard {
         self.refresh_preview(cx);
     }
 
+    /// Look the problem up on Luogu and fill the title field with its name.
+    ///
+    /// The lookup is a network round trip, so it runs off the UI thread; writing
+    /// the result back needs a `Window`, which is why the handler keeps a
+    /// `WindowHandle` from the click rather than touching the input directly.
+    fn lookup_problem(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pid) = problem::normalize_pid(&self.problem.read(cx).value()) else {
+            self.lookup = Lookup::Failed("先填一个洛谷题号，例如 P1001".to_owned());
+            cx.notify();
+            return;
+        };
+
+        let handle = window.window_handle();
+        let title = self.title.clone();
+        self.lookup = Lookup::Running;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { problem::lookup_cached(&pid) })
+                .await;
+
+            let outcome = match fetched {
+                Ok(info) => {
+                    let name = info.name.clone();
+                    // Filling the field is the whole point; if the window went
+                    // away the report below still tells the user what to type.
+                    let _ = handle.update(cx, move |_, window, cx| {
+                        title.update(cx, |state, cx| state.set_value(name, window, cx));
+                    });
+                    Ok(info)
+                }
+                Err(err) => Err(err.to_string()),
+            };
+
+            this.update(cx, |this, cx| {
+                this.lookup = match outcome {
+                    Ok(info) => Lookup::Done(Box::new(info)),
+                    Err(message) => Lookup::Failed(message),
+                };
+                this.refresh_preview(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Create the chapter, then report what was written.
     fn create(&mut self, cx: &mut Context<Self>) {
         if let Some(reason) = self.blocking_reason(cx) {
@@ -212,6 +271,53 @@ impl ChapterWizard {
             .gap_1()
             .child(Label::new(label.to_owned()).text_xs())
             .child(Input::new(input))
+    }
+
+    /// The 题号 row: the input plus the Luogu lookup button.
+    fn problem_row(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let busy = matches!(self.lookup, Lookup::Running);
+
+        let detail = match &self.lookup {
+            Lookup::Idle => "填题号后点「抓取」，自动取回题目名与难度。".to_owned(),
+            Lookup::Running => "正在从洛谷抓取…".to_owned(),
+            Lookup::Done(info) => {
+                let difficulty = info.difficulty_label().unwrap_or("未评定");
+                let tags = if info.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", info.tags.join("、"))
+                };
+                format!("✓ {}（{difficulty}）{tags} —— 已填入题目名，可手动改。", info.name)
+            }
+            Lookup::Failed(message) => format!("✗ {message} —— 手动填题目名即可，不影响创建。"),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            .child(Label::new("题号").text_xs())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w(px(0.0)).child(Input::new(&self.problem)))
+                    .child(
+                        Button::new("chapter-lookup")
+                            .label("抓取")
+                            .small()
+                            .loading(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.lookup_problem(window, cx);
+                            })),
+                    ),
+            )
+            .child(Label::new(detail).text_xs().text_color(muted))
+            .into_any_element()
     }
 
     fn book_picker(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -428,6 +534,7 @@ impl Render for ChapterWizard {
         let sections = self.section_picker(cx);
         let preview = self.preview_panel(cx);
         let outcome = self.outcome();
+        let problem_row = self.problem_row(cx);
 
         div()
             .flex()
@@ -452,7 +559,7 @@ impl Render for ChapterWizard {
                             .flex_col()
                             .w_full()
                             .gap_2()
-                            .child(self.field("题号", &self.problem))
+                            .child(problem_row)
                             .child(self.field("题目名", &self.title))
                             .child(self.field("视频链接（可留空）", &self.video))
                             .child(

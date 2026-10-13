@@ -17,6 +17,7 @@ regex.workspace = true
 chrono.workspace = true
 directories.workspace = true
 tokio.workspace = true
+ureq.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
