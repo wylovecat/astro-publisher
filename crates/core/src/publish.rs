@@ -122,11 +122,18 @@ pub enum PublishError {
 /// threads (the GUI) can push events onto a channel there. Cancellation is
 /// cooperative: set the flag and the run stops at the next safe point, killing a
 /// running build rather than leaving it behind.
-pub async fn run(
+///
+/// `emit` is generic rather than `&mut dyn FnMut`: a `dyn` callback is never
+/// `Send`, which would make the returned future non-`Send` and rule out callers
+/// that must spawn it on a multithreaded runtime (the MCP server).
+pub async fn run<F>(
     options: &PublishOptions,
     cancel: Arc<AtomicBool>,
-    emit: &mut dyn FnMut(PublishEvent),
-) -> Result<PublishSummary, PublishError> {
+    emit: &mut F,
+) -> Result<PublishSummary, PublishError>
+where
+    F: FnMut(PublishEvent),
+{
     let repo = options.repo.clone();
     let blog = repo.join("src").join("data").join("blog");
 
@@ -297,7 +304,7 @@ pub async fn run(
 }
 
 fn step(
-    emit: &mut dyn FnMut(PublishEvent),
+    emit: &mut impl FnMut(PublishEvent),
     index: usize,
     state: StepState,
     detail: String,
@@ -321,7 +328,7 @@ fn cancelled(flag: &AtomicBool) -> bool {
 async fn stream_command(
     cwd: &Path,
     cancel: &AtomicBool,
-    emit: &mut dyn FnMut(PublishEvent),
+    emit: &mut impl FnMut(PublishEvent),
     program: &str,
     args: &[&str],
 ) -> Result<process::CommandOutput, ProcessError> {

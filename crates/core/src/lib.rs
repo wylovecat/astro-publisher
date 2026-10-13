@@ -9,6 +9,7 @@
 
 pub mod books;
 pub mod chapters;
+pub mod config;
 pub mod frontmatter;
 pub mod images;
 pub mod outline;

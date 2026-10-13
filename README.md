@@ -14,6 +14,7 @@
 - **校验**：frontmatter 结构检查 + 大纲里 `/posts/...` 链接的坏链检查；错误阻塞发布，警告不阻塞。
 - **预览**：`pulldown-cmark` 解析 Markdown，公式交给 **KaTeX 本体** 渲染（与站点 rehype-katex 同源），不是近似实现。
 - **发布流水线**：校验 → 本地构建（权威校验）→ `git commit` → `git push` → 托管平台自动构建。推送失败不强推、不自动 rebase。
+- **MCP server**：同一套内容操作以 MCP 工具形式暴露给 AI 助手（stdio），只读工具与写操作分开，发布默认演练。
 - **无头 CLI**：以上全部能力都有命令行入口，便于脚本化或在没有图形环境的机器上使用。
 
 ## 目录结构
@@ -32,11 +33,14 @@
 │   │   ├── src/images.rs         #   粘贴图片的落盘位置与 Markdown 引用
 │   │   ├── src/validate.rs       #   全量校验（frontmatter 镜像 + 大纲坏链）
 │   │   ├── src/preview.rs        #   pulldown-cmark + KaTeX → HTML
+│   │   ├── src/config.rs         #   配置读写与仓库根目录探测（CLI / GUI / MCP 共用）
 │   │   ├── src/publish.rs        #   校验 → 构建 → 提交 → 推送（CLI 与 GUI 共用，事件流式上报）
 │   │   ├── src/process.rs        #   子进程（pnpm / git），UTF-8 流式输出
 │   │   └── src/bin/cli.rs        #   无头 CLI
-│   └── app/                      # GPUI 桌面应用（侧边栏 + 列表 + 编辑器 + 章节向导 + 发布 + 设置）
-│       └── src/views/
+│   ├── app/                      # GPUI 桌面应用（侧边栏 + 列表 + 编辑器 + 章节向导 + 发布 + 设置）
+│   │   └── src/views/
+│   └── mcp/                      # MCP server（stdio），把 core 的能力暴露给 AI 助手
+│       └── src/main.rs
 └── tests/fixtures/               # 合成测试内容（不含任何真实博客数据）
 ```
 
@@ -118,6 +122,31 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 - **粘贴的图片落在 `public/images/`**，文件名是 `<文章名>-<YYYYMMDD-HHMMSS>.<ext>`，正文里用绝对路径 `/images/<文件名>` 引用（`public/` 下的东西站点按根路径提供）。只接受站点能直接服务的扩展名（png/jpg/jpeg/webp/gif/svg/bmp/tiff/ico）。
 - 书籍登记在 `src/data/books.json`（见下），每条至少要有 `id`、`title`、`description`、`indexId`（指向大纲文章）。
 
+## MCP server（给 AI 助手用）
+
+`crates/mcp` 是一个 stdio MCP server，把 `core` 的能力以工具形式暴露出去。它不是另写一份逻辑：每个工具都是对 core 的直接调用，所以助手建的章节与桌面应用建的走同一条 slug 分配、同一套原子写与回滚、同一个校验门。
+
+```bash
+cargo build -p astro-publisher-mcp
+# 在 MCP 客户端的配置里指向 target/debug/astro-publisher-mcp(.exe)
+# 仓库路径与桌面应用共用 config.toml；也可用 ASTRO_PUBLISHER_REPO 覆盖
+```
+
+工具分三类，**读写是分开的**：
+
+| 类型 | 工具 |
+| --- | --- |
+| 只读 | `list_posts`、`read_post`、`list_books`、`list_sections`、`lookup_problem`、`validate`、`preview_chapter` |
+| 写 | `create_chapter`（建章节文件 + 改大纲，失败整体回滚） |
+| 有副作用 | `publish`（**默认演练**：不显式设 `dry_run: false` 就不会 commit / push） |
+
+两条刻意的设计：
+
+- **`preview_chapter` 不碰磁盘**，只算出将要分配的 slug 与改写后的大纲行。工具描述里要求助手先调它、给用户看过再写。
+- **发布默认演练**。工具调用本身不等于用户确认，所以真要推送必须显式传 `dry_run: false`；描述里也写明了这一点，避免助手把「帮你发布」理解成可以直接推线上。
+
+`publish` 的返回里带流水线自己的日志行，助手能报告实际发生了什么，而不是只回一个成败。
+
 ## 与博客仓库的集成
 
 只需一处改动：书籍数据放在 `src/data/books.json`，由 `src/data/books.ts` 薄包装导出类型，站点其余代码无需改动。工具通过 JSON 读写书籍登记，避免解析 TypeScript 源码。
@@ -181,11 +210,12 @@ cargo test
 
 ## 状态
 
-已经可用：文章编辑与预览（含**截图粘贴上传**）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）。
+已经可用：文章编辑与预览（含**截图粘贴上传**）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）。
 
 尚在完善：
 
-- MCP server（供 AI 助手直接操作博客）
+- 安装包代码签名（见「安装包」小节）
+- 版本号统一：目前靠 `makensis /DAPP_VERSION=` 手动传，与 `Cargo.toml` 易漂移
 
 ## 许可
 
