@@ -23,6 +23,10 @@ param(
     # Reuse whatever is already in target\release instead of rebuilding.
     [switch]$SkipBuild,
 
+    # Package even when target\release is older than the source tree
+    # (otherwise that is refused, because it silently ships stale code).
+    [switch]$Force,
+
     # Sign the installer after packaging. Requires -CertificateThumbprint or
     # -CertificatePath; without either, the script explains and stops.
     [switch]$Sign,
@@ -88,6 +92,34 @@ section of README.md.
         if (-not (Test-Path (Join-Path $sourceDir $exe))) {
             throw "$exe not found in $sourceDir - run without -SkipBuild first"
         }
+    }
+
+    # --- Refuse to package binaries older than the source -------------------
+    # `-SkipBuild` once shipped an installer whose app predated a UI fix,
+    # because target\release still held a months-old binary while every source
+    # file was newer. Packaging that binary looks successful and produces a
+    # broken installer, so compare the newest source mtime against the binary
+    # and stop unless the caller insists.
+    $appExe = Join-Path $sourceDir 'astro-publisher.exe'
+    $binaryTime = (Get-Item $appExe).LastWriteTimeUtc
+
+    $newestSource = Get-ChildItem -Path (Join-Path $root 'crates'), (Join-Path $root 'Cargo.toml') `
+            -Recurse -File -Include '*.rs', 'Cargo.toml' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\target\\' } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+
+    if ($newestSource -and $newestSource.LastWriteTimeUtc -gt $binaryTime) {
+        $msg = @"
+target\release\astro-publisher.exe is older than the source tree:
+  binary: $binaryTime
+  newest: $($newestSource.FullName)  ($($newestSource.LastWriteTimeUtc))
+
+Packaging it would ship an installer built from stale code. Re-run without
+-SkipBuild to rebuild first.
+"@
+        if (-not $Force) { throw $msg }
+        Write-Warning $msg
     }
 
     $distDir = Join-Path $root 'dist'

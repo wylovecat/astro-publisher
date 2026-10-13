@@ -195,6 +195,8 @@ pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置
 
 脚本同时把 `dist/SHA256SUMS.txt` 写成 `<hash>  <文件名>`，供分发的下载方核对。
 
+**`-SkipBuild` 会拒绝打包过期二进制**：如果 `target\release\astro-publisher.exe` 比源码树旧（说明源码改过但没重新编译），脚本直接报错并列出「二进制时间 vs 最新源文件」，除非显式加 `-Force`。加这道门是因为真出过事：一次 `-SkipBuild` 把补丁前的旧 `target\release` 打进了安装包，安装包看起来构建成功，实际装的还是没有该修复的程序 —— 用户报的「窗口按钮不显示」就是这么来的。
+
 > `packaging/build-installer.ps1` **刻意只用 ASCII**。含非 ASCII 的 `.ps1` 会按机器的 ANSI 代码页读取，字符串里一个被曲解的字节就会破坏解析（报 `'C' is not recognized as a cmdlet` 之类），与编码环境绑定。同理，`packaging/installer.nsi` 必须是**带 BOM 的 UTF-8**。
 
 ### 代码签名（可选）
