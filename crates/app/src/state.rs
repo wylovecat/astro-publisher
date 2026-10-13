@@ -159,6 +159,7 @@ impl Config {
 pub enum View {
     Posts,
     Editor,
+    Chapter,
     Outline,
     Publish,
     Settings,
@@ -169,16 +170,18 @@ impl View {
         match self {
             View::Posts => "文章",
             View::Editor => "编辑",
+            View::Chapter => "新建章节",
             View::Outline => "大纲",
             View::Publish => "发布",
             View::Settings => "设置",
         }
     }
 
-    pub fn all() -> [View; 5] {
+    pub fn all() -> [View; 6] {
         [
             View::Posts,
             View::Editor,
+            View::Chapter,
             View::Outline,
             View::Publish,
             View::Settings,

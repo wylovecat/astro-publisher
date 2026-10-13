@@ -225,6 +225,7 @@ dependencies = [
  "astro-publisher-core",
  "directories",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
  "serde",

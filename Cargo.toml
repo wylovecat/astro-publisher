@@ -26,6 +26,10 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }
 # Only the languages this tool actually edits are enabled, to keep compile
 # times down (plan §10).
 gpui-component = { version = "0.7.3", features = ["tree-sitter-markdown"] }
+# Bundled SVG icons. `gpui_component::init` does NOT register these: without
+# `application().with_assets(Assets)` every `Icon` renders empty, which is why a
+# title bar shows up with blank window buttons.
+gpui-kit-assets = "0.7.3"
 
 # Content / data layer
 serde = { version = "1", features = ["derive"] }

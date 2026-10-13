@@ -13,9 +13,11 @@
 //! astro-publisher-core publish     --message <m> [--repo <path>] [--no-build] [--dry-run]
 //! ```
 
-use astro_publisher_core::{books, chapters, posts, preview, process, slug, validate};
+use astro_publisher_core::{books, chapters, posts, preview, process, publish, slug, validate};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -314,92 +316,66 @@ fn cmd_preview(cli: &Cli) -> Result<ExitCode, String> {
 
 fn cmd_publish(repo: &Path, cli: &Cli) -> Result<ExitCode, String> {
     let message = cli.require(&cli.message, "--message")?;
-    let blog = blog_dir(repo);
 
-    // 1. Validation is the gate.
-    println!("[1/5] 校验内容…");
-    let report = validate::validate_all(&blog);
-    if report.has_errors() {
-        for finding in report.errors() {
-            eprintln!("[错误] {} — {}", finding.path, finding.message);
+    let options = publish::PublishOptions {
+        repo: repo.to_path_buf(),
+        message,
+        run_build: !cli.no_build,
+        dry_run: cli.dry_run,
+        git_remote: "origin".to_owned(),
+        git_branch: "main".to_owned(),
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    // The CLI prints the pipeline's events as they arrive; the desktop app
+    // renders the same events into a log panel.
+    let mut printer = |event: publish::PublishEvent| match event {
+        publish::PublishEvent::Step {
+            index,
+            state,
+            detail,
+            ..
+        } => println!(
+            "[{}/{}] {:<8} {detail}",
+            index + 1,
+            publish::STEP_COUNT,
+            state.label()
+        ),
+        publish::PublishEvent::Log(line) => match line.stream {
+            process::Stream::Stderr => eprintln!("  {}", line.text),
+            process::Stream::Stdout => println!("  {}", line.text),
+        },
+        publish::PublishEvent::Finished(summary) => {
+            if summary.pushed {
+                println!(
+                    "✓ 已推送 origin/{}（{} 篇文章，{} 个警告）",
+                    summary.branch, summary.post_count, summary.warning_count
+                );
+            } else {
+                println!("✓ 演练完成，未改动仓库");
+            }
         }
-        return Err(format!("有 {} 个错误，已中止发布", report.error_count()));
-    }
-    println!(
-        "      ✓ {} 篇文章，{} 个警告",
-        report.post_count,
-        report.warning_count()
-    );
+    };
 
-    // 2. Local build is the authoritative frontmatter check.
-    if cli.no_build {
-        println!("[2/5] 跳过本地构建（--no-build）");
-    } else {
-        println!("[2/5] 构建站点（pnpm build）…");
-        let status =
-            run_blocking(process::run_collect("pnpm", &["build"], repo)).map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("构建失败：\n{}", status.tail(25)));
+    match run_blocking(publish::run(&options, cancel, &mut printer)) {
+        Ok(_) => Ok(ExitCode::SUCCESS),
+        // Validation errors were already listed line by line through the event
+        // stream, so only the count is worth repeating here.
+        Err(publish::PublishError::Validation { findings }) => {
+            eprintln!("✗ 有 {} 个错误，已中止发布", findings.len());
+            Ok(ExitCode::FAILURE)
         }
-        println!("      ✓ 构建通过");
+        Err(err) => Err(err.to_string()),
     }
-
-    if cli.dry_run {
-        println!("[3/5] 跳过提交（--dry-run）");
-        println!("[4/5] 跳过推送（--dry-run）");
-        println!("[5/5] 完成（演练模式，未改动仓库）");
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // 3. Stage and commit.
-    println!("[3/5] 提交改动…");
-    let status = run_blocking(process::run_collect("git", &["status", "--porcelain"], repo))
-        .map_err(|e| e.to_string())?;
-    if status.stdout_text().trim().is_empty() {
-        return Err("没有需要提交的改动".to_owned());
-    }
-
-    run_blocking(process::run_collect("git", &["add", "-A"], repo)).map_err(|e| e.to_string())?;
-    run_blocking(process::run_collect("git", &["commit", "-m", &message], repo))
-        .map_err(|e| format!("提交失败：{e}"))?;
-    println!("      ✓ 已提交：{message}");
-
-    // 4. Push.
-    println!("[4/5] 推送…");
-    let branch = current_branch(repo)?;
-    match run_blocking(process::run_collect("git", &["push", "origin", &branch], repo)) {
-        Ok(_) => println!("      ✓ 已推送到 origin/{branch}"),
-        Err(err) => {
-            return Err(format!(
-                "推送失败，未做任何自动 rebase/强推：\n{err}\n\
-                 请手动处理：git pull --rebase origin {branch} 后重试"
-            ));
-        }
-    }
-
-    // 5. The hosting platform builds from the push.
-    println!("[5/5] 完成。托管平台会在收到推送后自动构建部署。");
-    Ok(ExitCode::SUCCESS)
 }
 
-fn current_branch(repo: &Path) -> Result<String, String> {
-    let out = run_blocking(process::run_collect(
-        "git",
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        repo,
-    ))
-    .map_err(|e| e.to_string())?;
-    let branch = out.stdout_text().trim().to_owned();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err("无法确定当前分支".to_owned());
-    }
-    Ok(branch)
-}
-
-/// Block on an async process helper from the synchronous CLI.
-fn run_blocking<F, T>(future: F) -> Result<T, process::ProcessError>
+/// Block on the publish pipeline from the synchronous CLI.
+///
+/// The pipeline owns its own tokio runtime usage, so this only has to drive it to
+/// completion and hand back the typed error for reporting.
+fn run_blocking<F, T>(future: F) -> Result<T, publish::PublishError>
 where
-    F: std::future::Future<Output = Result<T, process::ProcessError>>,
+    F: std::future::Future<Output = Result<T, publish::PublishError>>,
 {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

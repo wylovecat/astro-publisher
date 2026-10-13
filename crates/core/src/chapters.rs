@@ -120,6 +120,133 @@ pub fn chapter_frontmatter(
     }
 }
 
+/// What creating a chapter *would* do, without writing anything.
+///
+/// The wizard needs this to show the user the exact slug and outline line before
+/// they commit: `create_chapter` allocates a site-wide sequence and rewrites one
+/// line of the outline, which is too much to do speculatively.
+#[derive(Debug, Clone)]
+pub struct ChapterPreview {
+    /// The slug that would be allocated right now.
+    pub slug: String,
+    /// Decimal counter behind the slug (`0x0013` for `_0x0013`).
+    pub counter: u32,
+    /// Frontmatter title, i.e. `0x0013 【深基3.例1】数字比较`.
+    pub title_line: String,
+    /// Path the chapter file would be written to.
+    pub chapter_path: PathBuf,
+    /// Path of the outline that would be edited.
+    pub outline_path: PathBuf,
+    /// The outline line after the edit.
+    pub outline_after: String,
+    /// The outline line before the edit, when the entry already existed.
+    pub outline_before: Option<String>,
+    /// True when no line exists yet and one would be inserted.
+    pub inserted_entry: bool,
+}
+
+/// Compute the effect of creating a chapter, touching no files.
+pub fn preview_chapter(
+    blog_dir: &Path,
+    book: &BookRef,
+    input: &NewChapter,
+) -> Result<ChapterPreview, ChapterError> {
+    let group = book.group();
+    let file_name = format!("lg-{}.md", input.problem_id.trim());
+    let chapter_path = blog_dir.join(&group).join(&file_name);
+
+    if chapter_path.exists() {
+        return Err(ChapterError::ChapterExists(
+            chapter_path.display().to_string(),
+        ));
+    }
+
+    let outline_path = blog_dir.join(book.index_path());
+    let outline = Outline::read(&outline_path)?;
+
+    let next_slug = slug::allocate_slug(blog_dir);
+    let counter = slug::parse_counter(&next_slug).unwrap_or(1);
+
+    let section = outline
+        .find_sections(&input.section)
+        .into_iter()
+        .next()
+        .ok_or_else(|| ChapterError::SectionNotFound {
+            section: input.section.clone(),
+            file: outline_path.display().to_string(),
+        })?
+        .clone();
+
+    let existing = find_in_section(&outline, &section, &input.problem_id).cloned();
+    let inserted_entry = existing.is_none();
+    let video_marker = match input.video_url.as_deref().map(str::trim) {
+        Some(url) if !url.is_empty() => Marker::Linked {
+            label: "视频".to_owned(),
+            href: url.to_owned(),
+        },
+        _ => Marker::Placeholder,
+    };
+    let solution_marker = Marker::Linked {
+        label: "题解".to_owned(),
+        href: format!("/posts/{group}/{next_slug}"),
+    };
+
+    let (entry, before) = match existing {
+        Some(mut entry) => {
+            let before = Some(entry.raw.clone());
+            entry.solution = solution_marker;
+            if input.video_url.is_some() {
+                entry.video = video_marker;
+            }
+            if input.check_implies_solution {
+                entry.checked = true;
+            }
+            (entry, before)
+        }
+        None => {
+            let marker = outline.section_marker(&section);
+            (
+                OutlineEntry {
+                    line: 0,
+                    checked: input.check_implies_solution,
+                    marker: if marker == ListMarker::Plus {
+                        ListMarker::Dash
+                    } else {
+                        marker
+                    },
+                    problem_id: Some(input.problem_id.trim().to_owned()),
+                    title: input.title.trim().to_owned(),
+                    luogu_url: Some(format!(
+                        "https://www.luogu.com.cn/problem/{}",
+                        input.problem_id.trim()
+                    )),
+                    solution: solution_marker,
+                    video: video_marker,
+                    raw: String::new(),
+                },
+                None,
+            )
+        }
+    };
+
+    let title_line = format!(
+        "{} {}",
+        slug::format_title_counter(counter),
+        input.title.trim()
+    );
+
+    Ok(ChapterPreview {
+        slug: next_slug,
+        counter,
+        title_line,
+        chapter_path,
+        outline_path,
+        outline_after: render_entry(&entry),
+        outline_before: before,
+        inserted_entry,
+    })
+}
+
 /// Create a chapter and wire it into the book outline.
 ///
 /// `blog_dir` is `src/data/blog`; everything else is resolved relative to it.
@@ -344,5 +471,122 @@ mod tests {
             assert!(body.contains(heading), "missing {heading}");
         }
         assert!(body.contains("```cpp"), "cpp fence missing");
+    }
+
+    /// Copy the synthetic fixture tree so a test may write to it.
+    fn scratch() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "an-preview-chapter-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+        copy_tree(&src, &base);
+        base
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create scratch dir");
+        for entry in std::fs::read_dir(from).expect("read fixture dir") {
+            let entry = entry.expect("dir entry");
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy fixture file");
+            }
+        }
+    }
+
+    fn book_ref() -> BookRef {
+        BookRef {
+            id: "basic".into(),
+            title: "《Sample Course Book 基础篇》".into(),
+            index_id: "group/group-index".into(),
+        }
+    }
+
+    fn input() -> NewChapter {
+        NewChapter {
+            problem_id: "P2003".into(),
+            title: "三数之和".into(),
+            section: "2.3 综合练习".into(),
+            video_url: None,
+            author: "Example Author".into(),
+            check_implies_solution: true,
+        }
+    }
+
+    #[test]
+    fn preview_reports_the_slug_and_line_without_writing() {
+        let base = scratch();
+        let blog = base.join("blog");
+        let index_path = blog.join("group/group-index.md");
+        let before = std::fs::read_to_string(&index_path).expect("index readable");
+
+        let preview = preview_chapter(&blog, &book_ref(), &input()).expect("preview succeeds");
+
+        // The fixtures carry `_0x0001`; the next free slug is `_0x0002`.
+        assert_eq!(preview.slug, "_0x0002");
+        assert_eq!(preview.title_line, "0x0002 三数之和");
+        assert!(!preview.inserted_entry, "P2003 already has an outline line");
+        assert!(preview.outline_before.is_some());
+
+        // The preview must not have touched anything.
+        let untouched = std::fs::read_to_string(&index_path).expect("index readable");
+        assert_eq!(before, untouched);
+        assert!(!preview.chapter_path.exists(), "preview must not create the file");
+
+        // The previewed line matches what an actual creation produces.
+        let outcome = create_chapter(&blog, &book_ref(), &input()).expect("creation succeeds");
+        assert_eq!(outcome.slug, preview.slug);
+        assert_eq!(outcome.outline_after, preview.outline_after);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn preview_agrees_with_creation_for_an_inserted_line() {
+        let base = scratch();
+        let blog = base.join("blog");
+
+        let mut request = input();
+        request.problem_id = "B9999".into();
+        request.section = "2.4 额外加练".into();
+        request.title = "【样例9.例9】测试题目".into();
+
+        let preview = preview_chapter(&blog, &book_ref(), &request).expect("preview succeeds");
+        assert!(preview.inserted_entry, "a missing problem needs a new line");
+        assert!(preview.outline_before.is_none());
+
+        let outcome = create_chapter(&blog, &book_ref(), &request).expect("creation succeeds");
+        assert_eq!(outcome.outline_after, preview.outline_after);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn preview_refuses_an_existing_chapter_and_an_unknown_section() {
+        let base = scratch();
+        let blog = base.join("blog");
+
+        let mut existing = input();
+        existing.problem_id = "B1000".into();
+        existing.section = "1. 输出练习".into();
+        assert!(matches!(
+            preview_chapter(&blog, &book_ref(), &existing),
+            Err(ChapterError::ChapterExists(_))
+        ));
+
+        let mut unknown = input();
+        unknown.problem_id = "B8888".into();
+        unknown.section = "9.9 并不存在的小节".into();
+        assert!(matches!(
+            preview_chapter(&blog, &book_ref(), &unknown),
+            Err(ChapterError::SectionNotFound { .. })
+        ));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -13,6 +13,7 @@ pub mod frontmatter;
 pub mod outline;
 pub mod posts;
 pub mod preview;
+pub mod publish;
 pub mod process;
 pub mod slug;
 pub mod validate;

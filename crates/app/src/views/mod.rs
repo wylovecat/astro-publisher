@@ -1,5 +1,6 @@
 //! Views for each section of the app.
 
+pub mod chapter;
 pub mod editor;
 pub mod outline;
 pub mod posts;

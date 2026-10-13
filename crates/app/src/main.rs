@@ -29,6 +29,12 @@ pub struct PublisherApp {
     posts: Vec<state::PostRow>,
     /// Currently open post, when the editor view is active.
     open_post: Option<Entity<views::editor::EditorView>>,
+    /// Chapter wizard, created the first time the view is opened so its inputs
+    /// and running state survive switching pages.
+    chapter_wizard: Option<Entity<views::chapter::ChapterWizard>>,
+    /// Publish panel, kept for the same reason: a run in flight must not be
+    /// dropped because the user looked at another page.
+    publish_panel: Option<Entity<views::publish::PublishView>>,
     /// Repository-path field on the settings page.
     repo_input: Option<Entity<gpui_component::input::InputState>>,
     notice: Option<String>,
@@ -41,6 +47,8 @@ impl PublisherApp {
             view: View::Posts,
             posts: Vec::new(),
             open_post: None,
+            chapter_wizard: None,
+            publish_panel: None,
             repo_input: None,
             notice: None,
         };
@@ -136,6 +144,35 @@ impl PublisherApp {
     /// Current configuration (read-only), for the settings page.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    fn chapter_entity(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<views::chapter::ChapterWizard> {
+        if let Some(existing) = &self.chapter_wizard {
+            return existing.clone();
+        }
+        let entity = cx.new(|cx| {
+            views::chapter::ChapterWizard::new(self.config.clone(), window, cx)
+        });
+        self.chapter_wizard = Some(entity.clone());
+        entity
+    }
+
+    fn publish_entity(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<views::publish::PublishView> {
+        if let Some(existing) = &self.publish_panel {
+            return existing.clone();
+        }
+        let entity =
+            cx.new(|cx| views::publish::PublishView::new(self.config.clone(), window, cx));
+        self.publish_panel = Some(entity.clone());
+        entity
     }
 
     /// Open a post in the editor view.
@@ -254,8 +291,19 @@ impl PublisherApp {
                 )
                 .into_any_element(),
             },
+            View::Chapter => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(self.chapter_entity(window, cx))
+                .into_any_element(),
             View::Outline => views::outline::render(&self.config, cx).into_any_element(),
-            View::Publish => views::publish::render(&self.config, cx).into_any_element(),
+            View::Publish => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(self.publish_entity(window, cx))
+                .into_any_element(),
             View::Settings => {
                 // The settings page owns an editable repository-path field, so it
                 // needs the window (to create the input state) as well as self.
@@ -313,7 +361,13 @@ fn main() {
     let open_index = parse_open_index(&args);
     let start_view = parse_view(&args);
 
-    application().run(move |cx: &mut App| {
+    // The bundled SVG icons (including the window control glyphs in the title
+    // bar) have to be registered on the application itself: `gpui_component::init`
+    // does not do it, and unregistered icons render as empty space rather than
+    // failing, so the title bar shows up with blank buttons.
+    application()
+        .with_assets(gpui_kit_assets::Assets)
+        .run(move |cx: &mut App| {
         gpui_component::init(cx);
 
         let config = Config::load();
@@ -359,6 +413,7 @@ fn parse_view(args: &[String]) -> Option<View> {
     match args.get(position + 1)?.to_ascii_lowercase().as_str() {
         "posts" => Some(View::Posts),
         "editor" => Some(View::Editor),
+        "chapter" => Some(View::Chapter),
         "outline" => Some(View::Outline),
         "publish" => Some(View::Publish),
         "settings" => Some(View::Settings),

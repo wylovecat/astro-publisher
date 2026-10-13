@@ -24,15 +24,16 @@
 │   ├── core/                     # 内容操作库：纯 Rust、无 UI 依赖、可 cargo test
 │   │   ├── src/frontmatter.rs    #   frontmatter 解析 / 只重写围栏区的写回
 │   │   ├── src/outline.rs        #   课程大纲行解析 + 外科手术式写回
-│   │   ├── src/chapters.rs       #   create_chapter（原子多文件 + 回滚）
+│   │   ├── src/chapters.rs       #   preview_chapter（只读预演）/ create_chapter（原子多文件 + 回滚）
 │   │   ├── src/slug.rs           #   _0xNNNN 序列扫描与分配
 │   │   ├── src/posts.rs          #   文章读取 / 列表 / tags
 │   │   ├── src/books.rs          #   books.json 读写
 │   │   ├── src/validate.rs       #   全量校验（frontmatter 镜像 + 大纲坏链）
 │   │   ├── src/preview.rs        #   pulldown-cmark + KaTeX → HTML
+│   │   ├── src/publish.rs        #   校验 → 构建 → 提交 → 推送（CLI 与 GUI 共用，事件流式上报）
 │   │   ├── src/process.rs        #   子进程（pnpm / git），UTF-8 流式输出
 │   │   └── src/bin/cli.rs        #   无头 CLI
-│   └── app/                      # GPUI 桌面应用（侧边栏 + 列表 + 编辑器 + 大纲 + 发布 + 设置）
+│   └── app/                      # GPUI 桌面应用（侧边栏 + 列表 + 编辑器 + 章节向导 + 发布 + 设置）
 │       └── src/views/
 └── tests/fixtures/               # 合成测试内容（不含任何真实博客数据）
 ```
@@ -78,6 +79,13 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 
 `new-chapter` 是核心操作：它分配全站 `_0xNNNN` 序列 slug、生成章节文件、并把大纲对应行更新成 `📖[题解](/posts/<group>/<slug>)`。整个过程是原子的——任一步失败都会删掉已建文件、还原大纲。
 
+## 应用内操作
+
+- **新增章节**（侧边栏）：选书 → 选小节 → 填题号 / 题目名 / 视频链接 → 「将执行的操作」实时显示确切的 slug、章节文件路径与改写后的大纲行 → 点「创建章节」。勾选框控制 `[x]` 是否跟随题解（基础篇用勾选表示进度，进阶篇用视频标记）。
+- **发布**：填提交信息 → 「发布」跑完整流水线，「演练」只校验与构建不提交，「停止」会在下一个安全点中止（正在构建时会结束构建进程）。左侧是五个步骤的实时状态，右侧是校验、构建与 git 的逐行输出。推送失败只提示手动处理，不做自动 rebase 或强推。
+
+发布流水线实现在 `core/src/publish.rs`，CLI 的 `publish` 与应用里的按钮共用同一份，行为一致。
+
 ## 发布链路
 
 ```
@@ -116,7 +124,10 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 - **按钮用 `Button` 组件**，不要手写 `div().bg(theme.primary)`：需要同时导入 `button::{Button, ButtonVariants}` 与 `Sizable` 才能用 `.primary()` / `.small()`。手写 div 会渲染成一块没有文字的色块。
 - 主题里的 `primary` 本身是近黑色（shadcn 的 `neutral-900`），这是设计如此，不是 bug。
 - **`katex` crate 的默认后端不支持 MSVC**：默认 `quick-js` 只支持 unix 或 windows-gnu，Windows MSVC 需要 `duktape` 后端（见 `Cargo.toml` 注释）。
+- **滚动要用 `overflow_scrollbar()`**：`Styled` 只生成 `overflow_hidden` 系列，滚动能力在 gpui-component 的 `ScrollableElement` 上，需要 `use gpui_component::scroll::ScrollableElement`。
+- **建辅助 UI 函数时返回 `gpui::AnyElement`**：`impl IntoElement` 的返回类型会把 `&mut Context` 的借用带进元素类型，导致后面再拿同一个 `cx` 借用时报 `E0502`；`AnyElement` 不带生命周期。`Render::render` 本身仍按 trait 声明写 `impl IntoElement`。
 - **gpui 依赖要对齐版本**：`gpui-component` 依赖的是包名为 `gpui-pre` 的 gpui，而 crates.io 上另有一个无关的 `gpui`；直接用后者会导致 `Render` trait 不匹配。`Cargo.toml` 里已用包别名处理。
+- **图标资源必须显式注册**：`gpui_component::init(cx)` **不注册**图标资源（最小化/最大化/关闭等窗口按钮、按钮图标全部静默渲染成空白，不报错）。图标在独立 crate `gpui-kit-assets`，启动时须 `application().with_assets(gpui_kit_assets::Assets).run(...)`。忘记这一步时窗口右上角三个按钮完全消失，症状是「按钮不显示」而不是崩溃。
 
 ## 配置
 
@@ -164,13 +175,13 @@ cargo test
 
 ## 状态
 
-已经可用：文章编辑与预览、章节创建、大纲解析与校验、发布流水线的 CLI 实现。
+已经可用：文章编辑与预览、**新增章节向导**、大纲解析与校验、**一键发布与日志面板**（含演练与停止）。
 
 尚在完善：
 
-- 应用内的「一键发布」按钮与日志面板（流水线已在 core/CLI 实现，UI 目前只展示预检状态）
-- 「新增章节」向导界面（core 的 `create_chapter` 已实现并有测试）
-- 题目信息自动抓取、图片粘贴上传、MCP server（供 AI 助手直接操作博客）
+- 题目信息自动抓取（当前题号与题目名需手填）
+- 图片粘贴上传
+- MCP server（供 AI 助手直接操作博客）
 
 ## 许可
 
