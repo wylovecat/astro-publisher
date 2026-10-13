@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["wylovecat"]
+repository = "https://github.com/wylovecat/astro-publisher"
+description = "Desktop publisher for Astro blogs: write posts, create book chapters, validate, and publish."
+
+[workspace.dependencies]
+# GPUI stack — pinned exactly; upgrades are evaluated deliberately (plan §10).
+#
+# gpui-component 0.7.3 depends on the crate *published as* `gpui` version
+# `=0.3.9`, whose real package name is `gpui-pre`. Depending on the unrelated
+# `gpui = "0.2.2"` from crates.io puts two incompatible gpui crates in the graph
+# (`Render` is not implemented across them), so we alias the same package the
+# component library uses.
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+# Platform bootstrap (`application()`): the window/GPU backend entry point that
+# matches the gpui snapshot above.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }
+# Markdown syntax highlighting for the code editor (`tree-sitter-markdown`).
+# Only the languages this tool actually edits are enabled, to keep compile
+# times down (plan §10).
+gpui-component = { version = "0.7.3", features = ["tree-sitter-markdown"] }
+
+# Content / data layer
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+toml = "0.8"
+pulldown-cmark = "0.12"
+# `katex` ships the real KaTeX (same engine the site uses via rehype-katex).
+# Its default `quick-js` backend only supports unix or windows-gnu; MSVC needs
+# the `duktape` backend, which covers unix + windows (plan §10 risk table).
+katex = { version = "0.4", default-features = false, features = ["duktape"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+
+# Async / process
+tokio = { version = "1", features = ["process", "io-util", "rt", "macros", "sync", "time", "fs"] }
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

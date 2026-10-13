@@ -1,0 +1,22 @@
+[package]
+name = "astro-publisher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Desktop publisher for an Astro blog."
+
+[[bin]]
+name = "astro-publisher"
+path = "src/main.rs"
+
+[dependencies]
+astro-publisher-core = { path = "../core" }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+toml.workspace = true
+directories.workspace = true

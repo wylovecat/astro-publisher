@@ -1,0 +1,12 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Local configuration (never committed — contains machine-specific paths)
+config.toml
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,266 @@
+//! Post listing, reading, and frontmatter-level edits.
+//!
+//! Scope: the blog content directory (`src/data/blog`). Files whose name starts
+//! with `_` are excluded — the site's content collection uses the glob
+//! `**/[^_]*.md`, so they are not posts.
+
+use crate::frontmatter::{Frontmatter, MarkdownFile, FrontmatterError};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+/// Errors from post operations.
+#[derive(Debug, Error)]
+pub enum PostError {
+    #[error(transparent)]
+    Frontmatter(#[from] FrontmatterError),
+    #[error("failed to enumerate {path}: {source}")]
+    Walk {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("post {0} already exists")]
+    AlreadyExists(String),
+}
+
+/// A post on disk.
+#[derive(Debug, Clone)]
+pub struct Post {
+    /// Absolute path to the `.md` file.
+    pub path: PathBuf,
+    /// Path relative to the blog root, e.g. `lgj/lg-B2600.md`.
+    pub relative: String,
+    /// First path segment when nested, e.g. `lgj`. `None` for the blog root.
+    pub group: Option<String>,
+    pub frontmatter: Frontmatter,
+    /// Body with the frontmatter block removed.
+    pub body: String,
+}
+
+impl Post {
+    /// URL path as the site would publish it (`/posts/...`).
+    ///
+    /// Mirrors `src/utils/getPath.ts`: directory segments are slugified and the
+    /// last segment is the explicit `slug` when present, else the file stem.
+    pub fn url_path(&self) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        if let Some(group) = &self.group {
+            if !group.starts_with('_') {
+                segments.push(slugify(group));
+            }
+        }
+
+        let last = match self.frontmatter.slug.as_deref() {
+            Some(s) if !s.trim().is_empty() => slugify(s.trim()),
+            _ => slugify(&file_stem(&self.path)),
+        };
+        segments.push(last);
+        format!("/posts/{}", segments.join("/"))
+    }
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Slugify a path segment the way `getPath.ts` does (lowercase, spaces to `-`).
+fn slugify(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last_dash = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if ch == '-' || ch == '_' {
+            out.push(ch);
+            last_dash = false;
+        } else if ch.is_whitespace() {
+            if !last_dash && !out.is_empty() {
+                out.push('-');
+                last_dash = true;
+            }
+        } else {
+            // Non-ASCII (CJK) characters are kept as-is by Astro's slugifier.
+            out.push(ch);
+            last_dash = false;
+        }
+    }
+    out.trim_matches('-').to_owned()
+}
+
+/// True when the file is a post the site would collect.
+fn is_post_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return false;
+    };
+    if name.starts_with('_') || !name.ends_with(".md") {
+        return false;
+    }
+    // Directories starting with `_` are excluded too.
+    path.components().all(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(|s| !s.starts_with('_'))
+            .unwrap_or(false)
+    })
+}
+
+/// Iterate every post file under `blog_dir` (skipping `_`-prefixed names).
+pub fn iter_post_files(blog_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect(blog_dir, &mut out);
+    out.sort();
+    out
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('_') {
+            continue;
+        }
+        if path.is_dir() {
+            collect(&path, out);
+        } else if name.ends_with(".md") {
+            out.push(path);
+        }
+    }
+}
+
+/// List every post under the blog directory.
+pub fn list_posts(blog_dir: &Path) -> Result<Vec<Post>, PostError> {
+    let mut posts = Vec::new();
+    for path in iter_post_files(blog_dir) {
+        if !is_post_file(&path) {
+            continue;
+        }
+        let file = crate::frontmatter::read_markdown(&path)?;
+        posts.push(to_post(path, blog_dir, file));
+    }
+    Ok(posts)
+}
+
+fn to_post(path: PathBuf, blog_dir: &Path, file: MarkdownFile) -> Post {
+    let relative = path
+        .strip_prefix(blog_dir)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+    let group = relative.split_once('/').map(|(g, _)| g.to_owned());
+
+    Post {
+        path,
+        relative,
+        group,
+        frontmatter: file.frontmatter,
+        body: file.body,
+    }
+}
+
+/// Read a single post.
+pub fn get_post(path: &Path, blog_dir: &Path) -> Result<Post, PostError> {
+    let file = crate::frontmatter::read_markdown(path)?;
+    Ok(to_post(path.to_path_buf(), blog_dir, file))
+}
+
+/// All tags across the corpus, sorted and de-duplicated.
+pub fn list_tags(blog_dir: &Path) -> Result<Vec<String>, PostError> {
+    let mut tags: Vec<String> = list_posts(blog_dir)?
+        .into_iter()
+        .flat_map(|p| p.frontmatter.tags)
+        .collect();
+    tags.sort();
+    tags.dedup();
+    Ok(tags)
+}
+
+/// Input for creating a plain post (not a course chapter).
+#[derive(Debug, Clone)]
+pub struct NewPost {
+    /// Subdirectory under the blog root, e.g. `solu`. Empty for the root.
+    pub group: String,
+    /// File stem, without extension. Also the URL segment when `slug` is empty.
+    pub file_name: String,
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    /// Explicit frontmatter slug; empty means "derive from the file name".
+    pub slug: Option<String>,
+    pub draft: bool,
+    pub featured: bool,
+    pub author: String,
+}
+
+/// Create a new plain post. Fails if the target file already exists.
+pub fn create_post(blog_dir: &Path, input: &NewPost) -> Result<Post, PostError> {
+    let dir = if input.group.trim().is_empty() {
+        blog_dir.to_path_buf()
+    } else {
+        blog_dir.join(input.group.trim())
+    };
+    let path = dir.join(format!("{}.md", input.file_name.trim()));
+
+    if path.exists() {
+        return Err(PostError::AlreadyExists(path.display().to_string()));
+    }
+
+    let now = crate::now_local();
+    let frontmatter = Frontmatter {
+        author: Some(input.author.clone()),
+        pub_datetime: Some(now.clone()),
+        mod_datetime: Some(now),
+        title: Some(input.title.clone()),
+        featured: Some(input.featured),
+        draft: Some(input.draft),
+        slug: input
+            .slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_owned()),
+        tags: input.tags.clone(),
+        description: Some(input.description.clone()),
+    };
+
+    let file = MarkdownFile {
+        frontmatter,
+        body: format!("\n## {}\n\n", input.title),
+        line_ending: "\n".to_owned(),
+        had_bom: true,
+    };
+
+    crate::frontmatter::write_markdown(&path, &file)?;
+
+    let mut post = get_post(&path, blog_dir)?;
+    post.body = file.body;
+    Ok(post)
+}
+
+/// A frontmatter-level edit, applied surgically.
+pub fn update_frontmatter(
+    path: &Path,
+    edit: impl FnOnce(&mut Frontmatter),
+) -> Result<Frontmatter, PostError> {
+    let mut file = crate::frontmatter::read_markdown(path)?;
+    edit(&mut file.frontmatter);
+    crate::frontmatter::write_markdown(path, &file)?;
+    Ok(file.frontmatter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_keeps_cjk() {
+        assert_eq!(slugify("Solu"), "solu");
+        assert_eq!(slugify("lg-P1001"), "lg-p1001");
+        assert_eq!(slugify("_0x0001"), "_0x0001");
+    }
+}
