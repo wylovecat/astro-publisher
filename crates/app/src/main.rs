@@ -177,7 +177,9 @@ impl PublisherApp {
 
     /// Open a post in the editor view.
     pub fn open_post(&mut self, row: &state::PostRow, window: &mut Window, cx: &mut Context<Self>) {
-        let entity = cx.new(|cx| views::editor::EditorView::new(row.clone(), window, cx));
+        let repo = self.config.repo();
+        let entity =
+            cx.new(|cx| views::editor::EditorView::new(row.clone(), repo, window, cx));
         self.open_post = Some(entity);
         self.view = View::Editor;
         cx.notify();

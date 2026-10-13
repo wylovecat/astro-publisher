@@ -6,10 +6,10 @@
 //! gpui-component's own Markdown renderer is deliberately not used for the
 //! preview: it does not run KaTeX (verified during the spike).
 
-use astro_publisher_core::{preview, text_stats};
+use astro_publisher_core::{images, preview, text_stats};
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, IntoElement, Render, Window, div, px,
+    App, ClipboardEntry, Context, Entity, IntoElement, Render, WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme, Sizable,
@@ -23,6 +23,10 @@ use gpui_component::{
 pub struct EditorView {
     pub row: crate::state::PostRow,
     pub source: Entity<EditorState>,
+    /// Repository root, for resolving where pasted images go.
+    repo: std::path::PathBuf,
+    /// Handle used by the paste handler, which only has `&mut App`.
+    handle: WeakEntity<EditorView>,
     /// Rendered HTML, refreshed when the document changes.
     preview_html: String,
     stats: preview::TextStats,
@@ -33,6 +37,7 @@ pub struct EditorView {
 impl EditorView {
     pub fn new(
         row: crate::state::PostRow,
+        repo: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -59,6 +64,8 @@ impl EditorView {
         Self {
             row,
             source,
+            repo,
+            handle: cx.weak_entity(),
             preview_html: rendered.html,
             stats,
             dirty: false,
@@ -208,7 +215,25 @@ impl Render for EditorView {
                             .child(
                                 Editor::new(&self.source)
                                     .h(gpui::relative(1.0))
-                                    .appearance(true),
+                                    .appearance(true)
+                                    // Images pasted from the clipboard land in
+                                    // `public/images/` and become a Markdown
+                                    // reference; everything else falls through
+                                    // to the editor's normal text paste.
+                                    // Captured by value: `on_paste` hands the
+                                    // handler `&mut App`, not this view's
+                                    // context.
+                                    .on_paste({
+                                        let repo = self.repo.clone();
+                                        let stem = post_stem(&self.row.path);
+                                        let source = self.source.clone();
+                                        let status = self.handle.clone();
+                                        move |item, window, cx| {
+                                            paste_image(
+                                                &repo, &stem, &source, &status, item, window, cx,
+                                            )
+                                        }
+                                    }),
                             ),
                     )
                     // Preview
@@ -250,6 +275,95 @@ impl Render for EditorView {
 fn read_whole_file(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     Some(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
+}
+
+/// The post's file stem, used to name images pasted into it (`lg-P1001`).
+fn post_stem(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Store a clipboard image and insert a Markdown reference for it.
+///
+/// Returns whether the paste was consumed. A clipboard payload with no image is
+/// left alone so the editor's normal text paste still works.
+///
+/// A free function rather than a method because `Editor::on_paste` hands the
+/// handler `&mut App`; borrowing the view through its weak handle and passing
+/// that same `App` in would alias.
+fn paste_image(
+    repo: &std::path::Path,
+    post_stem: &str,
+    source: &Entity<EditorState>,
+    status: &WeakEntity<EditorView>,
+    item: &gpui::ClipboardItem,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(image) = item.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some(image),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    let outcome = images::store_image(
+        repo,
+        post_stem,
+        image_extension(image.format),
+        image.bytes(),
+        &stamp(),
+    )
+    .map(|stored| {
+        let markdown = images::markdown_reference(&stored.url_path, "");
+        // Insert at the caret so the reference lands where the user pasted.
+        source.update(cx, |state, cx| state.insert(markdown, window, cx));
+        stored.url_path
+    });
+
+    let message = match outcome {
+        Ok(url) => format!("已插入图片 {url}"),
+        Err(err) => format!("图片粘贴失败：{err}"),
+    };
+    let _ = status.update(cx, |this, cx| {
+        this.status = message;
+        cx.notify();
+    });
+
+    // Consumed either way: falling through would paste raw image bytes as text,
+    // which is worse than reporting the failure.
+    true
+}
+
+/// The extension `core::images` knows for a clipboard image format.
+fn image_extension(format: gpui::ImageFormat) -> &'static str {
+    match format {
+        gpui::ImageFormat::Png => "png",
+        gpui::ImageFormat::Jpeg => "jpg",
+        gpui::ImageFormat::Webp => "webp",
+        gpui::ImageFormat::Gif => "gif",
+        gpui::ImageFormat::Svg => "svg",
+        gpui::ImageFormat::Bmp => "bmp",
+        gpui::ImageFormat::Tiff => "tiff",
+        gpui::ImageFormat::Ico => "ico",
+        gpui::ImageFormat::Pnm => "pnm",
+    }
+}
+
+/// Timestamp for pasted-image file names: `20261013-183000`.
+///
+/// Built from the core timestamp (`2026-10-13T18:30:00.000+08:00`) so the app
+/// does not need its own clock, and so the blog's +08:00 convention holds.
+fn stamp() -> String {
+    let iso = astro_publisher_core::now_local();
+    let digits: String = iso.chars().filter(char::is_ascii_digit).collect();
+    // `YYYYMMDDhhmmss…`; keep the first 14 digits and split date from time.
+    if digits.len() >= 14 {
+        format!("{}-{}", &digits[0..8], &digits[8..14])
+    } else {
+        digits
+    }
 }
 
 /// The body of a document, i.e. everything after the frontmatter block.
