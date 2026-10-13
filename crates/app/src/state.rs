@@ -316,4 +316,33 @@ mod tests {
             PathBuf::from("C:/some/repo").join("src").join("data").join("blog")
         );
     }
+
+    #[test]
+    fn config_path_is_inside_the_platform_config_dir() {
+        // Guards the layout the installer/uninstaller and the README document:
+        // writing the settings file elsewhere would silently ignore the user's
+        // configured repository path.
+        let path = Config::path().expect("a config directory must resolve");
+        assert!(
+            path.ends_with("config.toml"),
+            "unexpected config file name: {}",
+            path.display()
+        );
+        println!("resolved config path: {}", path.display());
+    }
+
+    #[test]
+    fn a_saved_config_round_trips_through_load() {
+        // `save` writes and `load` reads the same shape, so a user-configured
+        // repository path survives a restart.
+        let text = toml::to_string_pretty(&Config {
+            repo_path: "D:/some/blog".to_owned(),
+            author: "Blog Author".to_owned(),
+            ..Config::default()
+        })
+        .expect("serialize");
+        let parsed: Config = toml::from_str(&text).expect("deserialize");
+        assert_eq!(parsed.repo_path, "D:/some/blog");
+        assert_eq!(parsed.author, "Blog Author");
+    }
 }

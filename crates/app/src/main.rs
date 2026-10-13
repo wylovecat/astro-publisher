@@ -29,6 +29,8 @@ pub struct PublisherApp {
     posts: Vec<state::PostRow>,
     /// Currently open post, when the editor view is active.
     open_post: Option<Entity<views::editor::EditorView>>,
+    /// Repository-path field on the settings page.
+    repo_input: Option<Entity<gpui_component::input::InputState>>,
     notice: Option<String>,
 }
 
@@ -39,10 +41,70 @@ impl PublisherApp {
             view: View::Posts,
             posts: Vec::new(),
             open_post: None,
+            repo_input: None,
             notice: None,
         };
         app.refresh_posts(cx);
         app
+    }
+
+    /// The settings page's repository-path field, created on first use so the
+    /// field exists before the page renders.
+    pub fn repo_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<gpui_component::input::InputState> {
+        if let Some(existing) = &self.repo_input {
+            return existing.clone();
+        }
+        let initial = self.config.repo_path.clone();
+        let entity = cx.new(|cx| {
+            let mut state = gpui_component::input::InputState::new(window, cx);
+            state.set_placeholder(
+                "例如 C:\\path\\to\\your-astro-blog（需含 package.json 与 src/data/blog）",
+                window,
+                cx,
+            );
+            state.set_value(initial, window, cx);
+            state
+        });
+        self.repo_input = Some(entity.clone());
+        entity
+    }
+
+    /// Apply the repository path typed into the settings field.
+    pub fn apply_repo_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.repo_input.clone() else {
+            return;
+        };
+        let typed = input.read(cx).value().to_string();
+        let trimmed = typed.trim().trim_matches('"').to_owned();
+
+        if trimmed.is_empty() {
+            self.set_notice("仓库路径不能为空".to_owned(), cx);
+            return;
+        }
+
+        let candidate = std::path::PathBuf::from(&trimmed);
+        if !state::looks_like_repo(&candidate) {
+            self.set_notice(
+                format!("这个路径不像博客仓库（需要 package.json 与 src/data/blog）：{trimmed}"),
+                cx,
+            );
+            return;
+        }
+
+        self.config.repo_path = trimmed.clone();
+        if let Err(err) = self.config.save() {
+            self.set_notice(format!("路径有效，但写入配置失败：{err}"), cx);
+        } else {
+            self.set_notice(format!("已切换到：{trimmed}"), cx);
+        }
+
+        // Reload the corpus from the newly selected repository.
+        self.refresh_posts(cx);
+        let _ = window;
     }
 
     /// Re-read the post list from disk.
@@ -69,6 +131,11 @@ impl PublisherApp {
     pub fn set_notice(&mut self, notice: String, cx: &mut Context<Self>) {
         self.notice = Some(notice);
         cx.notify();
+    }
+
+    /// Current configuration (read-only), for the settings page.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Open a post in the editor view.
@@ -170,7 +237,7 @@ impl PublisherApp {
             )
     }
 
-    fn body(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.view {
             View::Posts => views::posts::render(&self.posts, window, cx),
             View::Editor => match &self.open_post {
@@ -189,7 +256,11 @@ impl PublisherApp {
             },
             View::Outline => views::outline::render(&self.config, cx).into_any_element(),
             View::Publish => views::publish::render(&self.config, cx).into_any_element(),
-            View::Settings => views::settings::render(&self.config, cx).into_any_element(),
+            View::Settings => {
+                // The settings page owns an editable repository-path field, so it
+                // needs the window (to create the input state) as well as self.
+                views::settings::render(self, window, cx).into_any_element()
+            }
         }
     }
 }
@@ -235,9 +306,12 @@ impl Render for PublisherApp {
 }
 
 fn main() {
-    // `--open <n>` jumps straight into the editor for the n-th post, which makes
-    // the editor view verifiable without driving the UI by hand.
-    let open_index = parse_open_index(std::env::args().skip(1));
+    // Verification helpers: `--open <n>` jumps into the editor for the n-th
+    // post, `--view <name>` opens a named page directly. Both make the UI
+    // reachable without driving it by hand.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let open_index = parse_open_index(&args);
+    let start_view = parse_view(&args);
 
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
@@ -254,6 +328,9 @@ fn main() {
             move |window, cx| {
                 let app = cx.new(|cx| {
                     let mut app = PublisherApp::new(config.clone(), cx);
+                    if let Some(view) = start_view {
+                        app.set_view(view, cx);
+                    }
                     if let Some(index) = open_index {
                         if let Some(row) = app.posts.get(index).cloned() {
                             app.open_post(&row, window, cx);
@@ -271,8 +348,20 @@ fn main() {
 }
 
 /// Read `--open <n>` from the command line.
-fn parse_open_index(args: impl Iterator<Item = String>) -> Option<usize> {
-    let args: Vec<String> = args.collect();
+fn parse_open_index(args: &[String]) -> Option<usize> {
     let position = args.iter().position(|a| a == "--open")?;
     args.get(position + 1)?.parse().ok()
+}
+
+/// Read `--view <posts|editor|outline|publish|settings>` from the command line.
+fn parse_view(args: &[String]) -> Option<View> {
+    let position = args.iter().position(|a| a == "--view")?;
+    match args.get(position + 1)?.to_ascii_lowercase().as_str() {
+        "posts" => Some(View::Posts),
+        "editor" => Some(View::Editor),
+        "outline" => Some(View::Outline),
+        "publish" => Some(View::Publish),
+        "settings" => Some(View::Settings),
+        _ => None,
+    }
 }

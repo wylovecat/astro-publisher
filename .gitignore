@@ -2,6 +2,9 @@
 /target
 **/*.rs.bk
 
+# Installer output (`makensis` writes here; attach to a Release instead)
+/dist/
+
 # Local configuration (never committed — contains machine-specific paths)
 config.toml
 

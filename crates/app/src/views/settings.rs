@@ -1,29 +1,51 @@
 //! Settings view: repository path, author, git target, and publish options.
 //!
-//! The settings file lives in the platform config directory, never in the
-//! repository (plan §2.2).
+//! The repository path is *editable* here on purpose: an installed copy lives
+//! under the user's program directory, where walking up the filesystem can never
+//! find the blog. Without this field the installed app would be unusable.
+//!
+//! The settings file itself lives in the platform config directory, never in the
+//! repository.
 
-use crate::state::Config;
+use crate::PublisherApp;
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, div, px};
-use gpui_component::{ActiveTheme, Sizable, button::{Button, ButtonVariants}, label::Label};
+use gpui::{Context, IntoElement, Window, div, px};
+use gpui_component::{
+    ActiveTheme, Sizable,
+    button::{Button, ButtonVariants},
+    input::Input,
+    label::Label,
+};
 
 /// Render the settings panel.
-pub fn render(config: &Config, cx: &mut Context<crate::PublisherApp>) -> impl IntoElement {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
+pub fn render(
+    app: &mut PublisherApp,
+    window: &mut Window,
+    cx: &mut Context<PublisherApp>,
+) -> impl IntoElement {
+    // Copy theme colours out before touching `app` mutably: creating the input
+    // entity needs `&mut`, which would otherwise alias the theme borrow.
+    let border_color = cx.theme().border;
+    let danger_color = cx.theme().danger;
+    let muted = cx.theme().muted_foreground;
 
-    let config_path = Config::path()
+    let config = app.config().clone();
+    let config_path = crate::state::Config::path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(未知)".to_owned());
 
     let repo_ok = crate::state::looks_like_repo(&config.repo());
 
-    let rows: [(&str, String); 6] = [
-        ("仓库根目录", config.repo_path.clone()),
+    // The editable repository path, created on first render of this page.
+    let repo_input = app.repo_input(window, cx);
+
+    let details: [(&str, String); 5] = [
         ("内容目录", config.blog().display().to_string()),
         ("默认作者", config.author.clone()),
-        ("Git 远端 / 分支", format!("{} / {}", config.git_remote, config.git_branch)),
+        (
+            "Git 远端 / 分支",
+            format!("{} / {}", config.git_remote, config.git_branch),
+        ),
         (
             "发布前本地构建",
             if config.run_local_build {
@@ -43,17 +65,68 @@ pub fn render(config: &Config, cx: &mut Context<crate::PublisherApp>) -> impl In
         .gap_3()
         .overflow_hidden()
         .child(Label::new("设置").text_lg())
+        // --- Repository path -------------------------------------------------
         .child(
-            Label::new(if repo_ok {
-                "✓ 仓库路径有效"
-            } else {
-                "✕ 当前路径不像博客仓库（缺少 src/data/blog 或 package.json）"
-            })
-            .text_xs()
-            .text_color(if repo_ok { muted } else { theme.danger }),
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .border_1()
+                .border_color(if repo_ok { border_color } else { danger_color })
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(Label::new("博客仓库根目录").text_sm())
+                        .child(
+                            Label::new(if repo_ok {
+                                "✓ 有效"
+                            } else {
+                                "✕ 无效：需要含 package.json 与 src/data/blog"
+                            })
+                            .text_xs()
+                            .text_color(if repo_ok { muted } else { danger_color }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .child(div().flex_1().child(Input::new(&repo_input)))
+                        .child(
+                            Button::new("apply-repo")
+                                .label("应用并保存")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.apply_repo_path(window, cx);
+                                })),
+                        ),
+                )
+                .child(
+                    Label::new(format!("配置文件：{config_path}"))
+                        .text_xs()
+                        .text_color(muted),
+                )
+                .child(
+                    Label::new(
+                        "也可以设环境变量 ASTRO_PUBLISHER_REPO 覆盖（多机同步时用）。\
+                         改完点「应用并保存」会写入配置并重新加载文章列表。",
+                    )
+                    .text_xs()
+                    .text_color(muted),
+                ),
         )
-        .children(rows.into_iter().map(|(name, value)| {
-            let muted = theme.muted_foreground;
+        // --- Other settings (read-only for now) ------------------------------
+        .children(details.into_iter().map(move |(name, value)| {
             div()
                 .flex()
                 .flex_row()
@@ -63,7 +136,7 @@ pub fn render(config: &Config, cx: &mut Context<crate::PublisherApp>) -> impl In
                 .py_2()
                 .rounded_md()
                 .border_1()
-                .border_color(theme.border)
+                .border_color(border_color)
                 .child(
                     div()
                         .flex()
@@ -73,24 +146,4 @@ pub fn render(config: &Config, cx: &mut Context<crate::PublisherApp>) -> impl In
                 )
                 .child(Label::new(value).text_xs().text_color(muted))
         }))
-        .child(
-            Button::new("save-config")
-                .label("写回配置文件")
-                .small()
-                .secondary()
-                .on_click(cx.listener(|this, _, _, cx| match this.config.clone().save() {
-                    Ok(()) => this.set_notice("配置已保存".to_owned(), cx),
-                    Err(err) => this.set_notice(format!("保存失败：{err}"), cx),
-                })),
-        )
-        .child(
-            Label::new(format!("配置文件：{config_path}"))
-                .text_xs()
-                .text_color(muted),
-        )
-        .child(
-            Label::new("仓库路径可用环境变量 LLGORITHMNOTE_REPO 覆盖（多机同步时用）。")
-                .text_xs()
-                .text_color(muted),
-        )
 }

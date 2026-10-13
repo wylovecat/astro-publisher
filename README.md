@@ -120,7 +120,39 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 
 ## 配置
 
-配置文件位于系统配置目录（Windows `%APPDATA%\astro-publisher\astro-publisher\config.toml`，Linux `~/.config/astro-publisher/astro-publisher/config.toml`，macOS 对应 `Library/Application Support`），**不进入仓库**。可用环境变量 `ASTRO_PUBLISHER_REPO` 覆盖仓库路径，便于多机使用。
+配置文件位于系统配置目录，**不进入仓库**：
+
+| 平台 | 路径 |
+| --- | --- |
+| Windows | `%APPDATA%\astro-publisher\astro-publisher\config\config.toml` |
+| Linux | `~/.config/astro-publisher/astro-publisher/config.toml` |
+| macOS | `~/Library/Application Support/dev.astro-publisher.astro-publisher/config.toml` |
+
+（具体位置以应用「设置」页显示为准——那里直接打印当前生效的路径。）
+
+在「设置」页可以直接填仓库根目录并保存；也可用环境变量 `ASTRO_PUBLISHER_REPO` 覆盖（多机同步时更方便，优先级高于配置文件）。
+
+## 安装包（Windows）
+
+`packaging/installer.nsi` 是 NSIS 脚本，产出当前用户级安装包（不需要管理员权限）：
+
+```powershell
+cargo build --release -p astro-publisher -p astro-publisher-core
+makensis /DAPP_VERSION=0.1.0 /DSOURCE_DIR="$PWD\target\release" `
+         /DOUT_FILE="$PWD\dist\astro-publisher-0.1.0-setup.exe" packaging\installer.nsi
+```
+
+安装内容与行为：
+
+- 装到 `%LOCALAPPDATA%\Programs\astro-publisher`（per-user，全程无 UAC）
+- 开始菜单创建「Astro Publisher」与「卸载 Astro Publisher」
+- 在「应用和功能」登记卸载项（HKCU，含版本、发布者、占用大小、项目主页）
+- 静默安装：`astro-publisher-0.1.0-setup.exe /S`；静默卸载：`uninstall.exe /S`
+- 卸载会删程序与快捷方式，但**保留** `%APPDATA%` 下的配置，重装后你的仓库路径还在
+
+需要本机装有 [NSIS](https://nsis.sourceforge.io/)（`winget install NSIS.NSIS`）。脚本里 `Unicode true` 之外，**`.nsi` 文件本身必须是带 BOM 的 UTF-8**，否则含中文的字符串会报 `Bad text encoding`。
+
+> 安装包未做代码签名，首次运行会有 SmartScreen 提示（「更多信息」→「仍要运行」）。
 
 ## 测试
 
