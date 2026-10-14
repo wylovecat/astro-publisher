@@ -57,6 +57,34 @@ impl Post {
         segments.push(last);
         format!("/posts/{}", segments.join("/"))
     }
+
+    /// Whether this post matches a free-text query from a search box.
+    ///
+    /// Looks at the title, slug, path, and tags. The body is deliberately left
+    /// out: the desktop list re-filters on every keystroke, and scanning whole
+    /// articles there would make typing crawl.
+    pub fn matches_query(&self, query: &str) -> bool {
+        let title = self.frontmatter.title.as_deref().unwrap_or_default();
+        let slug = self.frontmatter.slug.as_deref().unwrap_or_default();
+
+        text_matches(title, query)
+            || text_matches(slug, query)
+            || text_matches(&self.relative, query)
+            || self
+                .frontmatter
+                .tags
+                .iter()
+                .any(|tag| text_matches(tag, query))
+    }
+}
+
+/// Case-insensitive substring test behind [`Post::matches_query`].
+///
+/// An empty or whitespace-only query matches everything, so callers can hand
+/// over raw input text without special-casing "no filter".
+pub fn text_matches(haystack: &str, query: &str) -> bool {
+    let needle = query.trim();
+    needle.is_empty() || haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn file_stem(path: &Path) -> String {
@@ -262,5 +290,44 @@ mod tests {
         assert_eq!(slugify("Solu"), "solu");
         assert_eq!(slugify("lg-P1001"), "lg-p1001");
         assert_eq!(slugify("_0x0001"), "_0x0001");
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert!(text_matches("anything", ""));
+        assert!(text_matches("anything", "   "));
+    }
+
+    #[test]
+    fn text_matches_ignores_case_and_surrounding_space() {
+        assert!(text_matches("lg-P1001 阶乘", " p1001 "));
+        assert!(text_matches("区间合并", "区间"));
+        assert!(!text_matches("区间合并", "线段"));
+    }
+
+    #[test]
+    fn matches_query_covers_title_slug_path_and_tags() {
+        let post = Post {
+            path: PathBuf::from("/blog/lgj/lg-P1001.md"),
+            relative: "lgj/lg-P1001.md".to_owned(),
+            group: Some("lgj".to_owned()),
+            frontmatter: Frontmatter {
+                title: Some("A+B Problem".to_owned()),
+                slug: Some("a-plus-b".to_owned()),
+                tags: vec!["模拟".to_owned(), "入门".to_owned()],
+                ..Default::default()
+            },
+            body: "the quick brown fox".to_owned(),
+        };
+
+        assert!(post.matches_query("a+b"), "title is searched");
+        assert!(post.matches_query("A-PLUS"), "slug search is case-insensitive");
+        assert!(post.matches_query("lgj/"), "path is searched");
+        assert!(post.matches_query("入门"), "tags are searched");
+
+        assert!(!post.matches_query("线段树"), "unrelated query does not match");
+        // The body is intentionally out of scope: searching it would mean
+        // rescanning every article on each keystroke.
+        assert!(!post.matches_query("quick"), "body is not searched");
     }
 }

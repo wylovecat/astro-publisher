@@ -4,7 +4,7 @@ use crate::state::Config;
 use astro_publisher_core::{books, outline::Outline};
 use gpui::prelude::*;
 use gpui::{Context, IntoElement, div};
-use gpui_component::{ActiveTheme, label::Label};
+use gpui_component::{ActiveTheme, label::Label, scroll::ScrollableElement};
 
 /// A book plus its parsed outline, or the error that stopped us reading it.
 struct BookProgress {
@@ -70,7 +70,10 @@ fn collect(config: &Config) -> Vec<BookProgress> {
 }
 
 /// Render the outline overview.
-pub fn render(config: &Config, cx: &Context<crate::PublisherApp>) -> impl IntoElement {
+pub fn render(
+    config: &Config,
+    cx: &Context<crate::PublisherApp>,
+) -> gpui::AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let progress = collect(config);
@@ -81,7 +84,8 @@ pub fn render(config: &Config, cx: &Context<crate::PublisherApp>) -> impl IntoEl
             .flex_col()
             .size_full()
             .p_4()
-            .child(Label::new("没有读到书籍登记表（src/data/books.json）").text_sm());
+            .child(Label::new("没有读到书籍登记表（src/data/books.json）").text_sm())
+            .into_any_element();
     }
 
     div()
@@ -90,7 +94,9 @@ pub fn render(config: &Config, cx: &Context<crate::PublisherApp>) -> impl IntoEl
         .size_full()
         .p_4()
         .gap_4()
-        .overflow_hidden()
+        // One card per book, and each card can list twelve unwritten entries,
+        // so this list routinely outgrows the window.
+        .overflow_y_scrollbar()
         .child(Label::new("课程进度").text_lg())
         .children(progress.into_iter().map(move |book| {
             let percent = if book.total == 0 {
@@ -151,4 +157,5 @@ pub fn render(config: &Config, cx: &Context<crate::PublisherApp>) -> impl IntoEl
                     )
                 })
         }))
+        .into_any_element()
 }

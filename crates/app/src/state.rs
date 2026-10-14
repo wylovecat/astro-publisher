@@ -70,6 +70,22 @@ impl PostRow {
             tags: post.frontmatter.tags.clone(),
         }
     }
+
+    /// Free-text match behind the post page's search box.
+    ///
+    /// Covers the same ground as
+    /// `astro_publisher_core::posts::Post::matches_query`, over the fields this
+    /// compact row keeps, so the list and the editor agree on what a query
+    /// matches.
+    pub fn matches_query(&self, query: &str) -> bool {
+        astro_publisher_core::posts::text_matches(&self.title, query)
+            || astro_publisher_core::posts::text_matches(&self.relative, query)
+            || astro_publisher_core::posts::text_matches(&self.url, query)
+            || self
+                .tags
+                .iter()
+                .any(|tag| astro_publisher_core::posts::text_matches(tag, query))
+    }
 }
 
 /// Load the post list for a configuration, tolerating an unset repo path.

@@ -17,7 +17,7 @@ use gpui::{
     App, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds, WindowOptions, div, px,
     size,
 };
-use gpui_component::{ActiveTheme, Root, Sizable, TitleBar, button::{Button, ButtonVariants}, label::Label};
+use gpui_component::{ActiveTheme, Root, Sizable, TitleBar, button::{Button, ButtonVariants}, input::InputState, label::Label};
 use gpui_platform::application;
 
 use state::{Config, View};
@@ -37,11 +37,30 @@ pub struct PublisherApp {
     publish_panel: Option<Entity<views::publish::PublishView>>,
     /// Repository-path field on the settings page.
     repo_input: Option<Entity<gpui_component::input::InputState>>,
+    /// Search field on the post page. Its text filters the list.
+    search_input: Entity<InputState>,
     notice: Option<String>,
 }
 
 impl PublisherApp {
-    fn new(config: Config, cx: &mut Context<Self>) -> Self {
+    fn new(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_placeholder("搜索标题 / 路径 / 标签", window, cx);
+            input
+        });
+        // Typing only re-renders the input itself, so the list needs an
+        // explicit nudge to re-filter. `Context::subscribe` holds the
+        // subscriber weakly, so detaching the handle is safe: the callback
+        // stops firing once this app entity is dropped.
+        // `InputState` implements `EventEmitter` for more than one event type,
+        // so the subscription has to say which one it wants.
+        cx.subscribe(
+            &search_input,
+            |_, _, _: &gpui_component::input::InputEvent, cx| cx.notify(),
+        )
+        .detach();
+
         let mut app = Self {
             config,
             view: View::Posts,
@@ -50,6 +69,7 @@ impl PublisherApp {
             chapter_wizard: None,
             publish_panel: None,
             repo_input: None,
+            search_input,
             notice: None,
         };
         app.refresh_posts(cx);
@@ -144,6 +164,11 @@ impl PublisherApp {
     /// Current configuration (read-only), for the settings page.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The post page's search field, so the view can render it next to the list.
+    pub fn search_input(&self) -> &Entity<InputState> {
+        &self.search_input
     }
 
     fn chapter_entity(
@@ -278,7 +303,12 @@ impl PublisherApp {
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.view {
-            View::Posts => views::posts::render(&self.posts, window, cx),
+            View::Posts => views::posts::render(
+                &self.posts,
+                self.search_input().clone(),
+                window,
+                cx,
+            ),
             View::Editor => match &self.open_post {
                 Some(entity) => div()
                     .flex()
@@ -383,7 +413,7 @@ fn main() {
             },
             move |window, cx| {
                 let app = cx.new(|cx| {
-                    let mut app = PublisherApp::new(config.clone(), cx);
+                    let mut app = PublisherApp::new(config.clone(), window, cx);
                     if let Some(view) = start_view {
                         app.set_view(view, cx);
                     }

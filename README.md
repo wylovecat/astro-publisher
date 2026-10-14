@@ -163,6 +163,10 @@ cargo build -p astro-publisher-mcp
 - 主题里的 `primary` 本身是近黑色（shadcn 的 `neutral-900`），这是设计如此，不是 bug。
 - **`katex` crate 的默认后端不支持 MSVC**：默认 `quick-js` 只支持 unix 或 windows-gnu，Windows MSVC 需要 `duktape` 后端（见 `Cargo.toml` 注释）。
 - **滚动要用 `overflow_scrollbar()`**：`Styled` 只生成 `overflow_hidden` 系列，滚动能力在 gpui-component 的 `ScrollableElement` 上，需要 `use gpui_component::scroll::ScrollableElement`。
+- **要滚动的 flex 子容器还得加 `.min_h(px(0.0))`**：flex 子项默认 `min-height: auto`，下限由内容撑开，光换 `overflow_scrollbar()` 不会滚——列表会把父容器顶出去，底部依然够不着。
+- **`overflow_y_scrollbar()` 会让函数返回类型变成 `Scrollable<Div>`**：辅助渲染函数若有多条 return 分支，`impl IntoElement` 会因各分支类型不一致而编译失败（`expected Div, found Scrollable<Div>`）。收成 `gpui::AnyElement` 并给每条分支加 `.into_any_element()`。
+- **`Context::subscribe` 的 `Subscription` 不能随手丢**：gpui 的 `Subscription` 在 `Drop` 时会退订，直接忽略返回值等于没订阅。父实体要被子实体变化驱动重渲染时，用 `.detach()`（`Context::subscribe` 内部持有的是 weak 引用，随父实体一起消失）。
+- **`InputState` 有多个 `EventEmitter` 实现**：`cx.subscribe(&input, |_, _, _, cx| ...)` 报 `E0283 type annotations needed`，因为 `InputEvent` 和 `NumberInputEvent` 都满足。要写全类型：`|_, _, _: &gpui_component::input::InputEvent, cx|`。
 - **建辅助 UI 函数时返回 `gpui::AnyElement`**：`impl IntoElement` 的返回类型会把 `&mut Context` 的借用带进元素类型，导致后面再拿同一个 `cx` 借用时报 `E0502`；`AnyElement` 不带生命周期。`Render::render` 本身仍按 trait 声明写 `impl IntoElement`。
 - **gpui 依赖要对齐版本**：`gpui-component` 依赖的是包名为 `gpui-pre` 的 gpui，而 crates.io 上另有一个无关的 `gpui`；直接用后者会导致 `Render` trait 不匹配。`Cargo.toml` 里已用包别名处理。
 - **图标资源必须显式注册**：`gpui_component::init(cx)` **不注册**图标资源（最小化/最大化/关闭等窗口按钮、按钮图标全部静默渲染成空白，不报错）。图标在独立 crate `gpui-kit-assets`，启动时须 `application().with_assets(gpui_kit_assets::Assets).run(...)`。忘记这一步时窗口右上角三个按钮完全消失，症状是「按钮不显示」而不是崩溃。

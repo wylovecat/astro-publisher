@@ -16,6 +16,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Editor, EditorState},
     label::Label,
+    scroll::ScrollableElement,
     text::TextView,
 };
 
@@ -260,7 +261,10 @@ impl Render for EditorView {
                                     .w_full()
                                     .min_h(px(0.0))
                                     .px_3()
-                                    .overflow_hidden()
+                                    // Rendered articles run far past the pane
+                                    // height; clipping here meant the tail of a
+                                    // long post was simply unreachable.
+                                    .overflow_y_scrollbar()
                                     .child(TextView::html(
                                         "editor-preview",
                                         self.preview_html.clone(),

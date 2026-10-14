@@ -15,6 +15,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     input::Input,
     label::Label,
+    scroll::ScrollableElement,
 };
 
 /// Render the settings panel.
@@ -63,7 +64,7 @@ pub fn render(
         .size_full()
         .p_4()
         .gap_3()
-        .overflow_hidden()
+        .overflow_y_scrollbar()
         .child(Label::new("设置").text_lg())
         // --- Repository path -------------------------------------------------
         .child(
