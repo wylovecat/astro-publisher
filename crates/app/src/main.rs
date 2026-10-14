@@ -1,3 +1,15 @@
+// The desktop app is a GUI binary on Windows. Without this the linker marks the
+// executable as a console program and the loader attaches a console, so every
+// launch shows a black window behind (or in front of) the app. Kept conditional
+// on `debug_assertions` so `cargo run` still prints panics and logs to the
+// terminal while developing.
+//
+// Hiding our own console is only half the fix: a console-subsystem child spawned
+// by a GUI-subsystem parent has no console to inherit and gets a brand new one,
+// so the publish pipeline's `git` / `pnpm` calls would each flash a window. Those
+// run with `CREATE_NO_WINDOW` - see `hide_console` in the core crate.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Desktop publisher for the Astro blog.
 //!
 //! The binary is a thin shell over `astro-publisher-core`: all content logic
@@ -9,6 +21,7 @@
 //! `application().run(...)` → `gpui_component::init(cx)` → `open_window` with a
 //! `Root` at the top level.
 
+mod live_preview;
 mod state;
 mod views;
 
@@ -35,6 +48,9 @@ pub struct PublisherApp {
     /// Publish panel, kept for the same reason: a run in flight must not be
     /// dropped because the user looked at another page.
     publish_panel: Option<Entity<views::publish::PublishView>>,
+    /// The `astro dev` server behind the editor's "real preview". Owned by the
+    /// app, not the editor, so switching posts does not restart it.
+    live_preview: Option<Entity<live_preview::LivePreview>>,
     /// Repository-path field on the settings page.
     repo_input: Option<Entity<gpui_component::input::InputState>>,
     /// Search field on the post page. Its text filters the list.
@@ -68,6 +84,7 @@ impl PublisherApp {
             open_post: None,
             chapter_wizard: None,
             publish_panel: None,
+            live_preview: None,
             repo_input: None,
             search_input,
             notice: None,
@@ -200,11 +217,22 @@ impl PublisherApp {
         entity
     }
 
+    fn live_preview_entity(&mut self, cx: &mut Context<Self>) -> Entity<live_preview::LivePreview> {
+        if let Some(existing) = &self.live_preview {
+            return existing.clone();
+        }
+        let entity = cx.new(|cx| live_preview::LivePreview::new(self.config.clone(), cx));
+        self.live_preview = Some(entity.clone());
+        entity
+    }
+
     /// Open a post in the editor view.
     pub fn open_post(&mut self, row: &state::PostRow, window: &mut Window, cx: &mut Context<Self>) {
         let repo = self.config.repo();
-        let entity =
-            cx.new(|cx| views::editor::EditorView::new(row.clone(), repo, window, cx));
+        let preview = self.live_preview_entity(cx);
+        let entity = cx.new(|cx| {
+            views::editor::EditorView::new(row.clone(), repo, preview, window, cx)
+        });
         self.open_post = Some(entity);
         self.view = View::Editor;
         cx.notify();
@@ -303,6 +331,11 @@ impl PublisherApp {
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.view {
+            View::Dashboard => {
+                // The recent-posts list opens posts, so this view needs `self`
+                // and the window, like the settings page.
+                views::dashboard::render(self, window, cx).into_any_element()
+            }
             View::Posts => views::posts::render(
                 &self.posts,
                 self.search_input().clone(),
@@ -443,6 +476,7 @@ fn parse_open_index(args: &[String]) -> Option<usize> {
 fn parse_view(args: &[String]) -> Option<View> {
     let position = args.iter().position(|a| a == "--view")?;
     match args.get(position + 1)?.to_ascii_lowercase().as_str() {
+        "dashboard" => Some(View::Dashboard),
         "posts" => Some(View::Posts),
         "editor" => Some(View::Editor),
         "chapter" => Some(View::Chapter),

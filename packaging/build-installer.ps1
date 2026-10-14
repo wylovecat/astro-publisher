@@ -4,7 +4,7 @@
 # `Cargo.toml` (via `cargo metadata`, which resolves workspace inheritance).
 # Building the installer used to mean hand-typing `/DAPP_VERSION=0.1.0` next to
 # a `Cargo.toml` that said something else, and the two drifting apart silently
-# — the installed Add/Remove entry, the exe metadata and the file name would
+# - the installed Add/Remove entry, the exe metadata and the file name would
 # all claim a version the crate never had.
 #
 # NOTE: this file is deliberately pure ASCII. A .ps1 containing non-ASCII is
@@ -83,12 +83,14 @@ section of README.md.
     # --- Binaries -----------------------------------------------------------
     if (-not $SkipBuild) {
         Write-Host 'building release binaries...'
-        cargo build --release -p astro-publisher -p astro-publisher-core
+        # All three front ends ship in the installer: the desktop app, the
+        # headless CLI, and the MCP server an AI assistant launches.
+        cargo build --release -p astro-publisher -p astro-publisher-core -p astro-publisher-mcp
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     }
 
     $sourceDir = Join-Path $root 'target\release'
-    foreach ($exe in 'astro-publisher.exe', 'astro-publisher-core.exe') {
+    foreach ($exe in 'astro-publisher.exe', 'astro-publisher-core.exe', 'astro-publisher-mcp.exe') {
         if (-not (Test-Path (Join-Path $sourceDir $exe))) {
             throw "$exe not found in $sourceDir - run without -SkipBuild first"
         }

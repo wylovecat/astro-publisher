@@ -29,6 +29,7 @@ Unicode true
 !define APP_URL "https://github.com/wylovecat/astro-publisher"
 !define APP_EXE "astro-publisher.exe"
 !define APP_CLI "astro-publisher-core.exe"
+!define APP_MCP "astro-publisher-mcp.exe"
 
 Name "${APP_DISPLAY} ${APP_VERSION}"
 OutFile "${OUT_FILE}"
@@ -67,9 +68,14 @@ Section "Application" SecMain
   SetOutPath "$INSTDIR"
 
   File "${SOURCE_DIR}\${APP_EXE}"
-  ; The CLI is optional in the build: include it when present.
-  IfFileExists "${SOURCE_DIR}\${APP_CLI}" 0 +2
-    File "${SOURCE_DIR}\${APP_CLI}"
+  ; All three front ends ship: the desktop app above, the headless CLI, and the
+  ; MCP server an AI assistant launches as a stdio process. Packed
+  ; unconditionally, not behind IfFileExists: the build script builds all
+  ; three, and a silently-skipped binary would yield an installer that looks
+  ; fine while missing a tool. A missing file is a hard makensis error, which
+  ; is exactly what the packager should see.
+  File "${SOURCE_DIR}\${APP_CLI}"
+  File "${SOURCE_DIR}\${APP_MCP}"
 
   ; Uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -116,6 +122,7 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\${APP_CLI}"
+  Delete "$INSTDIR\${APP_MCP}"
   Delete "$INSTDIR\uninstall.exe"
 
   Delete "$SMPROGRAMS\${APP_DISPLAY}\${APP_DISPLAY}.lnk"

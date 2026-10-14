@@ -8,11 +8,12 @@
 
 ## 能力
 
+- **总览（仪表盘）**：文章数 / 草稿数 / 未关联题解数 / 校验错误与警告，各书大纲进度条，以及按 frontmatter 时间排序的「最近修改」——点任意一篇直接进编辑器。
 - **文章管理**：列表、搜索、frontmatter 表单（标题 / 标签 / 草稿 / 特色 / 时间），点开即编辑。
 - **章节创建（核心）**：一次操作同时生成章节文件并更新课程大纲，自动分配全站递增的 `_0xNNNN` slug；任一步失败整体回滚。题号可一键从洛谷抓回题目名 / 难度 / 标签。
 - **大纲维护**：解析 Part / 章 / 小节 / 题目四层结构，支持勾选、关联题解、关联视频、插入新行与新标题。
 - **校验**：frontmatter 结构检查 + 大纲里 `/posts/...` 链接的坏链检查；错误阻塞发布，警告不阻塞。
-- **预览**：`pulldown-cmark` 解析 Markdown，公式交给 **KaTeX 本体** 渲染（与站点 rehype-katex 同源），不是近似实现。
+- **预览**：编辑器右侧实时预览，由 gpui-component 的 Markdown 引擎排版（代码块保持等宽与缩进、行内代码带底色），公式交给 **KaTeX 本体** 排版（与站点 rehype-katex 同源），不是近似实现。旁边的「真实预览」按钮会起站点自己的 `pnpm dev`（端口 4321）并在系统浏览器里打开当前文章——草稿在 dev 服务器里同样不可见（站点无条件过滤 draft），所以该按钮只对已发布文章可用。
 - **发布流水线**：校验 → 本地构建（权威校验）→ `git commit` → `git push` → 托管平台自动构建。推送失败不强推、不自动 rebase。
 - **MCP server**：同一套内容操作以 MCP 工具形式暴露给 AI 助手（stdio），只读工具与写操作分开，发布默认演练。
 - **无头 CLI**：以上全部能力都有命令行入口，便于脚本化或在没有图形环境的机器上使用。
@@ -21,6 +22,7 @@
 
 ```
 ├── Cargo.toml                    # workspace（Cargo.lock 入库以锁定 GPUI 生态版本）
+├── PLAN.md                       # 最初的实施计划（里程碑 / 风险表 / 验收标准；代码注释里的 plan §x.y 指此）
 ├── crates/
 │   ├── core/                     # 内容操作库：纯 Rust、无 UI 依赖、可 cargo test
 │   │   ├── src/frontmatter.rs    #   frontmatter 解析 / 只重写围栏区的写回
@@ -32,7 +34,8 @@
 │   │   ├── src/problem.rs        #   洛谷题目信息抓取（题号 → 题目名 / 难度 / 标签，带磁盘缓存）
 │   │   ├── src/images.rs         #   粘贴图片的落盘位置与 Markdown 引用
 │   │   ├── src/validate.rs       #   全量校验（frontmatter 镜像 + 大纲坏链）
-│   │   ├── src/preview.rs        #   pulldown-cmark + KaTeX → HTML
+│   │   ├── src/preview.rs        #   pulldown-cmark + KaTeX → HTML（CLI 的 `preview`）
+│   │   ├── src/math_dom.rs       #   KaTeX 的 HTML 读回成可布局的公式树（分式 / 上下标 / 根号 / 矩阵）
 │   │   ├── src/config.rs         #   配置读写与仓库根目录探测（CLI / GUI / MCP 共用）
 │   │   ├── src/publish.rs        #   校验 → 构建 → 提交 → 推送（CLI 与 GUI 共用，事件流式上报）
 │   │   ├── src/process.rs        #   子进程（pnpm / git），UTF-8 流式输出
@@ -91,7 +94,8 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 ## 应用内操作
 
 - **新增章节**（侧边栏）：选书 → 选小节 → 填题号 → 点「抓取」自动取回题目名（可手动改）→ 填视频链接 → 「将执行的操作」实时显示确切的 slug、章节文件路径与改写后的大纲行 → 点「创建章节」。勾选框控制 `[x]` 是否跟随题解（基础篇用勾选表示进度，进阶篇用视频标记）。
-- **编辑文章**：源码 + 实时预览并排。编辑器里 **Ctrl+V 粘贴截图**会写入仓库 `public/images/`，并在光标处插入 `![](/images/<文章名>-<时间戳>.png)`；写入失败会报原因而不是把二进制当文本贴进去。非图片的剪贴板内容照旧走普通文本粘贴。
+- **编辑文章**：源码 + 实时预览并排。预览走 gpui-component 的 Markdown 引擎：代码块按代码块画（等宽、缩进保留、背景与右上角语言标签），行内代码带底色。编辑器里 **Ctrl+V 粘贴截图**会写入仓库 `public/images/`，并在光标处插入 `![](/images/<文章名>-<时间戳>.png)`；写入失败会报原因而不是把二进制当文本贴进去。非图片的剪贴板内容照旧走普通文本粘贴。
+- **预览里的公式**：`$…$` 与 `$$…$$` 由 KaTeX 本体排版（与站点 rehype-katex 同一套引擎），再由 `core/src/math_dom.rs` 把 KaTeX 的排版结构读回成公式树、`app/src/views/preview_math.rs` 用 GPUI 原生画出——GPUI 没有 CSS 引擎，直接喂 HTML 只会显示 MathML 源码。分式、上下标、根号、`\sum` 的上下限、`\boxed`、`array`/`cases` 都按 KaTeX 的结构还原；KaTeX 自带 SVG 的字形（`\vec` 的箭头、可伸缩括号）退回 Unicode 近似。KaTeX 自己排不出的公式（例如 duktape 后端下的 `pmatrix`）退回显示源码，预览不会少内容。
 - **发布**：填提交信息 → 「发布」跑完整流水线，「演练」只校验与构建不提交，「停止」会在下一个安全点中止（正在构建时会结束构建进程）。左侧是五个步骤的实时状态，右侧是校验、构建与 git 的逐行输出。推送失败只提示手动处理，不做自动 rebase 或强推。
 
 发布流水线实现在 `core/src/publish.rs`，CLI 的 `publish` 与应用里的按钮共用同一份，行为一致。
@@ -131,7 +135,9 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 
 ```bash
 cargo build -p astro-publisher-mcp
-# 在 MCP 客户端的配置里指向 target/debug/astro-publisher-mcp(.exe)
+# 或者直接用安装包：装好后它是
+#   %LOCALAPPDATA%\Programs\astro-publisher\astro-publisher-mcp.exe
+# 在 MCP 客户端的配置里指向该路径（从源码构建则指向 target/debug/astro-publisher-mcp(.exe)）
 # 仓库路径与桌面应用共用 config.toml；也可用 ASTRO_PUBLISHER_REPO 覆盖
 ```
 
@@ -161,7 +167,10 @@ cargo build -p astro-publisher-mcp
 - **`Editor` 必须显式给高度**：用 `Editor::new(&state).h(relative(1.0))`。gpui-component 的多行输入内部是 `height: relative(1.0)`，只靠外层 `flex_1` 会让百分比对上不确定的盒子，编辑器塌缩到只显示两三行。
 - **按钮用 `Button` 组件**，不要手写 `div().bg(theme.primary)`：需要同时导入 `button::{Button, ButtonVariants}` 与 `Sizable` 才能用 `.primary()` / `.small()`。手写 div 会渲染成一块没有文字的色块。
 - 主题里的 `primary` 本身是近黑色（shadcn 的 `neutral-900`），这是设计如此，不是 bug。
-- **`katex` crate 的默认后端不支持 MSVC**：默认 `quick-js` 只支持 unix 或 windows-gnu，Windows MSVC 需要 `duktape` 后端（见 `Cargo.toml` 注释）。
+- **`TextView::html` 不能用来显示 Markdown**：它的 HTML 路径是散文渲染器——`<pre>` 没有分支会被折成段落，而 `<pre><code>` 里的空白因为父节点是 `code`（只对 `pre`/`textarea` 保留空白）被压成空格，缩进全丢。显示 Markdown 要用 `TextView::markdown`，代码块、行内代码、表格、任务列表都由它原生画。公式不在它的能力范围内，用 `MarkdownPlugin` 自己接。
+- **KaTeX 的 HTML 不能直接喂给 GPUI**：KaTeX 输出的是带 CSS class 与 `top`/`vertical-align` 内联样式的 HTML（还有一份 MathML 副本和若干 SVG 字形），`TextView::html` 会把它们当普通文字合并，于是公式显示成 MathML 源码。正确做法见 `core/src/math_dom.rs`。
+- **KaTeX 的竖直列表（vlist）条目顺序不固定**：`\frac` 的 DOM 顺序是「下 → 上」，`array` 的行是「上 → 下」。唯一两边一致的是每个条目的 `top` 偏移（越小越靠上），要按它排序。另外每条 entry 的内容包在子 span 里，判断「这条是不是 frac-line」只能往下看一层——再多看就会把嵌套公式内部的 `frac-line` 认成外层的。
+- **`katex` crate 的默认后端不支持 MSVC**：默认 `quick-js` 只支持 unix 或 windows-gnu，Windows MSVC 需要 `duktape` 后端（见 `Cargo.toml` 注释）。`duktape` 没有 ES6 的 `Array.prototype.fill`，KaTeX 靠它画 SVG，所以带可伸缩定界符的公式（`pmatrix`/`bmatrix`）在这个后端下会直接报错，调用方要能退回显示源码。
 - **滚动要用 `overflow_scrollbar()`**：`Styled` 只生成 `overflow_hidden` 系列，滚动能力在 gpui-component 的 `ScrollableElement` 上，需要 `use gpui_component::scroll::ScrollableElement`。
 - **要滚动的 flex 子容器还得加 `.min_h(px(0.0))`**：flex 子项默认 `min-height: auto`，下限由内容撑开，光换 `overflow_scrollbar()` 不会滚——列表会把父容器顶出去，底部依然够不着。
 - **`overflow_y_scrollbar()` 会让函数返回类型变成 `Scrollable<Div>`**：辅助渲染函数若有多条 return 分支，`impl IntoElement` 会因各分支类型不一致而编译失败（`expected Div, found Scrollable<Div>`）。收成 `gpui::AnyElement` 并给每条分支加 `.into_any_element()`。
@@ -170,6 +179,11 @@ cargo build -p astro-publisher-mcp
 - **建辅助 UI 函数时返回 `gpui::AnyElement`**：`impl IntoElement` 的返回类型会把 `&mut Context` 的借用带进元素类型，导致后面再拿同一个 `cx` 借用时报 `E0502`；`AnyElement` 不带生命周期。`Render::render` 本身仍按 trait 声明写 `impl IntoElement`。
 - **gpui 依赖要对齐版本**：`gpui-component` 依赖的是包名为 `gpui-pre` 的 gpui，而 crates.io 上另有一个无关的 `gpui`；直接用后者会导致 `Render` trait 不匹配。`Cargo.toml` 里已用包别名处理。
 - **图标资源必须显式注册**：`gpui_component::init(cx)` **不注册**图标资源（最小化/最大化/关闭等窗口按钮、按钮图标全部静默渲染成空白，不报错）。图标在独立 crate `gpui-kit-assets`，启动时须 `application().with_assets(gpui_kit_assets::Assets).run(...)`。忘记这一步时窗口右上角三个按钮完全消失，症状是「按钮不显示」而不是崩溃。
+- **桌面程序不要留控制台**：`crates/app/src/main.rs` 顶部用 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`，所以 **release 版进程没有控制台**（启动时不再出现黑色窗口），代价是 release 下的 `println!`/panic 都看不见——排查问题用 debug 版（`cargo run`，仍带控制台）。
+- **连带规则：spawn 子进程必须过 `process::hide_console`**。一个没有控制台的父进程去启动控制台程序时，Windows 会**给子进程新开一个控制台窗口**：发布流水线的 `git`（每次都闪一下）与 `pnpm build`（`pnpm.cmd` 实为 `cmd.exe` → `node.exe`，黑窗整段构建都挂着）。`core/src/process.rs` 里三处 `Command`（`spawn_streaming`、`run_collect`、`kill_tree` 的 `taskkill`）都加了 `CREATE_NO_WINDOW`；实测该标志连**孙进程**也覆盖（GUI 父进程 + 无标志 → 出现新控制台窗口；+ 标志 → 直接子进程与嵌套子进程都不出现）。新增 spawn 时别漏。
+- **`astro dev` 预览服务器必须显式收掉，且钩子只有 `on_window_closed` 可用**：「真实预览」起的 `pnpm dev` 是一个 `node` 进程，占着端口 4321，不清理会一直留着。它挂的钩子是 `Window`/`App` 的 `on_window_closed`（关窗时用 `taskkill /T` 收整棵树）；**不要指望 `on_app_quit`**——本版 gpui 只由 `App::shutdown()` 运行那些回调，而关窗路径走不到它（实测：探针写在 `on_app_quit` 里，进程退出了、探针从未生成）。已知缺口：**强杀进程（任务管理器 / `Stop-Process -Force`）仍会留下这个 node**，只有 Windows job object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）能覆盖那种情况，目前没做。
+- **服务器就绪不要靠 sleep，要读它自己报的地址**：`pnpm dev` 冷启动实测 ~6.4 秒，所以按钮点了不能立刻开浏览器。就绪信号是那行 `┃ Local    http://localhost:4321/`（**带 ANSI 颜色码**，得先 `process::strip_ansi` 再匹配）；从日志里读端口而不是写死 4321，是因为端口被占时 Astro 会静默换一个，写死就会打开错地址。
+- **长时间运行的子进程不要用 `spawn_streaming`**：它会把每一行输出都留在内存里直到进程退出（对 `pnpm build` 是对的，对跑几小时的 dev server 就是无界增长）。长任务用 `spawn_background`，它只转发不累积。
 
 ## 配置
 
@@ -224,6 +238,8 @@ EV 证书（或已积累信誉的 OV 证书）才能立刻消除 SmartScreen 警
 ### 安装内容与行为
 
 - 装到 `%LOCALAPPDATA%\Programs\astro-publisher`（per-user，全程无 UAC）
+- 三个可执行文件都装在该目录：桌面应用 `astro-publisher.exe`、无头 CLI `astro-publisher-core.exe`、MCP server `astro-publisher-mcp.exe`（后两个是独立二进制；AI 助手的配置里直接指向安装目录下这一份即可，不必另外构建）。三者都是**无条件打包**：缺任何一个 makensis 会直接报错，不会悄悄出一个少了工具的安装包
+- 只给桌面应用建快捷方式：CLI 与 MCP server 是命令行 / stdio 进程，双击启动没有意义
 - 开始菜单创建「Astro Publisher」与「卸载 Astro Publisher」
 - 在「应用和功能」登记卸载项（HKCU，含版本、发布者、占用大小、项目主页）
 - 静默安装：`astro-publisher-<版本>-setup.exe /S`；静默卸载：`uninstall.exe /S`
@@ -237,16 +253,20 @@ EV 证书（或已积累信誉的 OV 证书）才能立刻消除 SmartScreen 警
 cargo test
 ```
 
-测试全部基于 `tests/fixtures/` 下的**合成内容**，覆盖：大纲解析与无损往返、单行编辑不影响相邻行、`_0xNNNN` 分配、章节创建的原子性与回滚、frontmatter 写回（含 CRLF 与代码块里的 `---`）、KaTeX 渲染与降级、仓库根目录自动探测。
+测试全部基于 `tests/fixtures/` 下的**合成内容**，覆盖：大纲解析与无损往返、单行编辑不影响相邻行、`_0xNNNN` 分配、章节创建的原子性与回滚、frontmatter 写回（含 CRLF 与代码块里的 `---`）、KaTeX 渲染与降级、仓库根目录自动探测，以及 `math_dom` 把 KaTeX 输出读回公式树（分式 / 上下标 / 根号 / 上下限 / 表格 / 框）。
+
+预览的排版效果只能看，不能断言。`cargo run -p astro-publisher --example previewshot` 会开一个只渲染预览的窗口（固定示例文档，含代码块与各类公式），改动排版后用它截图核对；主程序另有 `--open <n>` / `--view <name>` 两个验证用参数。
 
 ## 状态
 
-已经可用：文章编辑与预览（含**截图粘贴上传**）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）、**一键打包脚本**（版本号自动取自 `Cargo.toml`，可选签名）。
+已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）、**一键打包脚本**（版本号自动取自 `Cargo.toml`，可选签名）。
 
 尚在完善：
 
 - 代码签名证书：脚本已接好签名步骤，但证书需要自行向 CA 申请（见「安装包」小节）
 - 本章节暂未纳入 `cargo test`：打包脚本本身没有自动化测试，靠手工跑一次验证
+
+最初的实施计划（里程碑 Spike / M0 / M1 / M2、风险表、验收标准）整理在 [`PLAN.md`](PLAN.md)——代码注释里的 `plan §x.y` 引用都指向它。
 
 ## 许可
 

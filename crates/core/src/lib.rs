@@ -12,6 +12,7 @@ pub mod chapters;
 pub mod config;
 pub mod frontmatter;
 pub mod images;
+pub mod math_dom;
 pub mod outline;
 pub mod posts;
 pub mod preview;

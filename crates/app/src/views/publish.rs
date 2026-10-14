@@ -124,7 +124,13 @@ impl PublishView {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PublishEvent>();
         let cancel = self.cancel.clone();
 
-        let worker = cx.background_executor().spawn(async move {
+        // Detached, not awaited: awaiting this task before draining would hold
+        // every event in the channel until the whole pipeline finished, so the
+        // step list and the log would only appear all at once at the very end
+        // instead of streaming as the build runs. The channel closes when the
+        // worker (the last sender) is done, which is the cue to finish.
+        cx.background_executor()
+            .spawn(async move {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -152,12 +158,12 @@ impl PublishView {
                     }));
                 }
             }
-        });
+        })
+        .detach();
 
-        // Drain events on the UI thread so the panel updates live.
+        // Drain events on the UI thread as they arrive, so the panel updates
+        // live. This ends when the channel closes — the pipeline has finished.
         cx.spawn(async move |this, cx| {
-            worker.await;
-
             while let Some(event) = rx.recv().await {
                 this.update(cx, |this, cx| {
                     this.apply(event, cx);

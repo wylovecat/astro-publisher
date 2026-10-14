@@ -12,6 +12,7 @@ pub use astro_publisher_core::config::{Config, looks_like_repo};
 /// Which section of the app is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
+    Dashboard,
     Posts,
     Editor,
     Chapter,
@@ -23,6 +24,7 @@ pub enum View {
 impl View {
     pub fn title(self) -> &'static str {
         match self {
+            View::Dashboard => "仪表盘",
             View::Posts => "文章",
             View::Editor => "编辑",
             View::Chapter => "新建章节",
@@ -32,8 +34,9 @@ impl View {
         }
     }
 
-    pub fn all() -> [View; 6] {
+    pub fn all() -> [View; 7] {
         [
+            View::Dashboard,
             View::Posts,
             View::Editor,
             View::Chapter,
@@ -53,6 +56,9 @@ pub struct PostRow {
     pub draft: bool,
     pub url: String,
     pub tags: Vec<String>,
+    /// `modDatetime`, falling back to `pubDatetime`: the site's own notion of
+    /// when a post last changed. `None` when the frontmatter has neither.
+    pub modified: Option<String>,
 }
 
 impl PostRow {
@@ -68,6 +74,11 @@ impl PostRow {
             draft: post.frontmatter.draft.unwrap_or(false),
             url: post.url_path(),
             tags: post.frontmatter.tags.clone(),
+            modified: post
+                .frontmatter
+                .mod_datetime
+                .clone()
+                .or_else(|| post.frontmatter.pub_datetime.clone()),
         }
     }
 

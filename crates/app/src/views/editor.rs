@@ -1,11 +1,20 @@
-//! Editor view: Markdown source on one side, live core-rendered preview on the
-//! other, with the frontmatter form above.
+//! Editor view: Markdown source on one side, live preview on the other, with
+//! the frontmatter form above.
 //!
-//! The preview uses `astro_publisher_core::preview` (pulldown-cmark + the KaTeX
-//! binding), so mathematics typesets the same way the published site does.
-//! gpui-component's own Markdown renderer is deliberately not used for the
-//! preview: it does not run KaTeX (verified during the spike).
+//! The preview is rendered by gpui-component's Markdown engine
+//! ([`gpui_component::text::TextView::markdown`]) rather than its HTML one:
+//! that is what draws a fenced block as a block — monospaced, on its own
+//! background, with the language in the corner — and an inline span as code.
+//! The HTML engine is a prose renderer: it folds `<pre>` into a paragraph and
+//! collapses the whitespace inside `<pre><code>`, so a code block arrived as
+//! one wrapped paragraph.
+//!
+//! Mathematics comes from [`crate::views::preview_math`], a plugin on that same
+//! engine: KaTeX typesets the formula exactly as the published site's
+//! rehype-katex does, and the plugin draws the result natively.
 
+use crate::live_preview::LivePreview;
+use crate::views::preview_math::MathPlugin;
 use astro_publisher_core::{images, preview, text_stats};
 use gpui::prelude::*;
 use gpui::{
@@ -26,10 +35,15 @@ pub struct EditorView {
     pub source: Entity<EditorState>,
     /// Repository root, for resolving where pasted images go.
     repo: std::path::PathBuf,
+    /// The app-owned `astro dev` server behind the "real preview" button. It is
+    /// a separate entity because it outlives this view: a fresh `EditorView` is
+    /// built for every post opened, and a server owned here would be killed on
+    /// every switch.
+    live_preview: Entity<LivePreview>,
     /// Handle used by the paste handler, which only has `&mut App`.
     handle: WeakEntity<EditorView>,
-    /// Rendered HTML, refreshed when the document changes.
-    preview_html: String,
+    /// The document body, re-rendered by the Markdown engine on every change.
+    preview_source: String,
     stats: preview::TextStats,
     dirty: bool,
     status: String,
@@ -39,6 +53,7 @@ impl EditorView {
     pub fn new(
         row: crate::state::PostRow,
         repo: std::path::PathBuf,
+        live_preview: Entity<LivePreview>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -59,15 +74,16 @@ impl EditorView {
         })
         .detach();
 
-        let rendered = preview::render_preview(&body_of(&text));
-        let stats = text_stats(&body_of(&text));
+        let body = body_of(&text);
+        let stats = text_stats(&body);
 
         Self {
             row,
             source,
             repo,
+            live_preview,
             handle: cx.weak_entity(),
-            preview_html: rendered.html,
+            preview_source: body,
             stats,
             dirty: false,
             status: "已载入".to_owned(),
@@ -78,14 +94,9 @@ impl EditorView {
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
         let text = self.source.read(cx).value().to_string();
         let body = body_of(&text);
-        let rendered = preview::render_preview(&body);
         self.stats = text_stats(&body);
-        self.preview_html = rendered.html;
-        self.status = if rendered.math_failures.is_empty() {
-            "预览已更新".to_owned()
-        } else {
-            format!("{} 个公式未渲染", rendered.math_failures.len())
-        };
+        self.preview_source = body;
+        self.status = "预览已更新".to_owned();
         cx.notify();
     }
 
@@ -175,6 +186,18 @@ impl Render for EditorView {
         // and holding a theme borrow across that call would alias it.
         let border = cx.theme().border;
         let muted = cx.theme().muted_foreground;
+
+        // The preview panel always points at the post that is open. Setting the
+        // target does not notify: the panel renders right after this, and
+        // re-rendering another entity from inside a render would be a loop for
+        // no gain. Done before `frontmatter_bar`, which hands back an element
+        // that borrows the context.
+        let url = self.row.url.clone();
+        let draft = self.row.draft;
+        self.live_preview
+            .update(cx, |panel, _| panel.set_target(url, draft));
+        let live_preview = self.live_preview.clone();
+
         let bar = self.frontmatter_bar(cx);
 
         div()
@@ -247,11 +270,20 @@ impl Render for EditorView {
                             .min_w(px(0.0))
                             .overflow_hidden()
                             .child(
-                                div().px_3().py_1().child(
-                                    Label::new("预览（与站点同源：KaTeX）")
-                                        .text_xs()
-                                        .text_color(muted),
-                                ),
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .px_3()
+                                    .py_1()
+                                    .child(
+                                        Label::new("预览（与站点同源：KaTeX）")
+                                            .text_xs()
+                                            .text_color(muted),
+                                    )
+                                    .child(live_preview),
                             )
                             .child(
                                 div()
@@ -265,10 +297,17 @@ impl Render for EditorView {
                                     // height; clipping here meant the tail of a
                                     // long post was simply unreachable.
                                     .overflow_y_scrollbar()
-                                    .child(TextView::html(
-                                        "editor-preview",
-                                        self.preview_html.clone(),
-                                    )),
+                                    // The Markdown engine draws code blocks and
+                                    // inline code itself; the plugins add `$…$`
+                                    // and `$$…$$`.
+                                    .child(
+                                        TextView::markdown(
+                                            "editor-preview",
+                                            self.preview_source.clone(),
+                                        )
+                                        .plugin(MathPlugin::inline())
+                                        .plugin(MathPlugin::block()),
+                                    ),
                             ),
                     ),
             )

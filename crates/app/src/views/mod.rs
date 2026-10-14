@@ -1,9 +1,11 @@
 //! Views for each section of the app.
 
 pub mod chapter;
+pub mod dashboard;
 pub mod editor;
 pub mod outline;
 pub mod posts;
+pub mod preview_math;
 pub mod publish;
 pub mod settings;
 
