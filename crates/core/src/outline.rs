@@ -144,6 +144,24 @@ pub struct OutlineEntry {
     pub raw: String,
 }
 
+/// An entry that has no 题解 link yet, paired with the section it lives in.
+///
+/// This is the input to "create the chapter for this one": the section heading is
+/// what `chapters::create_chapter` needs to find the line again, and it cannot be
+/// recovered from the entry alone because the same problem id appears in several
+/// sections (plan §1.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwrittenEntry {
+    /// Heading text of the owning section, exactly as `find_sections` matches it.
+    pub section: String,
+    /// 0-based line index, unique within the file: the natural per-entry key.
+    pub line: usize,
+    pub checked: bool,
+    /// `None` for a plain-text entry, which cannot be named after a problem.
+    pub problem_id: Option<String>,
+    pub title: String,
+}
+
 /// A section of the outline: a heading plus the entries under it.
 #[derive(Debug, Clone)]
 pub struct OutlineSection {
@@ -324,6 +342,31 @@ impl Outline {
         let total = self.entries.len();
         let done = self.entries.iter().filter(|e| e.checked).count();
         (done, total)
+    }
+
+    /// Entries whose 题解 marker is not a link, in document order.
+    ///
+    /// Walks `sections` rather than `entries` so each entry keeps the heading it
+    /// sits under — the same problem id may appear in more than one section, and
+    /// creation has to target the right one.
+    pub fn unwritten(&self) -> Vec<UnwrittenEntry> {
+        self.sections
+            .iter()
+            .flat_map(|section| {
+                let heading = section.text.clone();
+                section
+                    .entries
+                    .iter()
+                    .filter(|entry| !entry.solution.is_linked())
+                    .map(move |entry| UnwrittenEntry {
+                        section: heading.clone(),
+                        line: entry.line,
+                        checked: entry.checked,
+                        problem_id: entry.problem_id.clone(),
+                        title: entry.title.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Replace the entry on `line` with an edited copy, preserving everything

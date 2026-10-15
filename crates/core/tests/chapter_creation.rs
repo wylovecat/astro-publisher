@@ -6,8 +6,10 @@
 //! The fixtures are synthetic, so no real blog content is required to run these.
 
 use astro_publisher_core::books::{Book, get_book, list_books};
-use astro_publisher_core::chapters::{ChapterError, NewChapter, create_chapter};
-use astro_publisher_core::outline::Outline;
+use astro_publisher_core::chapters::{
+    ChapterError, NewChapter, create_chapter, create_chapter_from_entry,
+};
+use astro_publisher_core::outline::{Outline, UnwrittenEntry};
 use astro_publisher_core::posts;
 use std::path::{Path, PathBuf};
 
@@ -282,6 +284,154 @@ fn slug_allocation_scans_every_post_and_ignores_non_slug_fields() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn one_click_creation_from_an_outline_entry_uses_the_books_own_words() {
+    let scratch = Scratch::new();
+    let book = Scratch::basic_book();
+    let index_path = scratch.blog.join("group/group-index.md");
+
+    // Exactly what the outline page hands the button: the entry as parsed, plus
+    // its section. No form, no hand-typed title.
+    let outline = Outline::read(&index_path).expect("index readable");
+    let entry = outline
+        .unwritten()
+        .into_iter()
+        .find(|e| e.problem_id.as_deref() == Some("P2004"))
+        .expect("P2004 is listed but unwritten");
+    let entry_title = entry.title.clone();
+
+    let outcome = create_chapter_from_entry(
+        &scratch.blog,
+        &book.as_book_ref(),
+        &entry,
+        "Example Author",
+        true,
+    )
+    .expect("one-click creation succeeds");
+
+    // The file is named after the problem, and the entry's own title is used.
+    assert_eq!(
+        outcome.chapter_path.file_name().unwrap(),
+        "lg-P2004.md",
+        "named after the problem id taken from the outline"
+    );
+    assert!(
+        outcome.title_line.ends_with(&entry_title),
+        "title comes from the outline: {} (wanted {entry_title})",
+        outcome.title_line
+    );
+
+    // ...and the outline line it came from is now linked.
+    let after = Outline::read(&index_path).expect("index re-readable");
+    let rewritten = after
+        .entries_for_problem("P2004")
+        .into_iter()
+        .next()
+        .expect("P2004 still present");
+    assert_eq!(
+        rewritten.solution.href(),
+        Some(format!("/posts/group/{}", outcome.slug).as_str())
+    );
+    assert!(rewritten.checked);
+
+    // It left the unwritten list, which is what makes the button disappear.
+    assert!(
+        !after
+            .unwritten()
+            .iter()
+            .any(|e| e.problem_id.as_deref() == Some("P2004")),
+        "a created problem is no longer offered"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch.root);
+}
+
+#[test]
+fn one_click_creation_leaves_the_checkbox_alone_when_progress_is_tracked_by_video() {
+    // 进阶篇 semantics: `[x]` already means "video done", so linking a solution
+    // must not be what ticks the box.
+    let scratch = Scratch::new();
+    let book = Book {
+        id: "advanced".into(),
+        title: "《Sample Course Book 进阶篇》".into(),
+        subtitle: None,
+        description: "d".into(),
+        index_id: "advanced/advanced-index".into(),
+        cover_class: None,
+    };
+    let index_path = scratch.blog.join("advanced/advanced-index.md");
+
+    let outline = Outline::read(&index_path).expect("index readable");
+    let entry = outline
+        .unwritten()
+        .into_iter()
+        .find(|e| e.problem_id.as_deref() == Some("P3008"))
+        .expect("P3008 is listed but unwritten");
+
+    create_chapter_from_entry(
+        &scratch.blog,
+        &book.as_book_ref(),
+        &entry,
+        "Example Author",
+        false,
+    )
+    .expect("one-click creation succeeds");
+
+    let after = Outline::read(&index_path).expect("index re-readable");
+    let rewritten = after
+        .entries_for_problem("P3008")
+        .into_iter()
+        .next()
+        .expect("P3008 still present");
+    assert!(rewritten.solution.is_linked(), "solution link was written");
+    assert!(
+        !rewritten.checked,
+        "the box is the book's video progress, not the solution's"
+    );
+    assert_eq!(
+        rewritten.video,
+        astro_publisher_core::outline::Marker::Placeholder,
+        "no video URL was offered, so its placeholder stays"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch.root);
+}
+
+#[test]
+fn an_entry_without_a_problem_id_is_refused_before_anything_is_written() {
+    let scratch = Scratch::new();
+    let book = Scratch::basic_book();
+    let index_path = scratch.blog.join("group/group-index.md");
+    let before = std::fs::read_to_string(&index_path).expect("index readable");
+
+    // A plain-text outline line: nothing to name the chapter file after.
+    let entry = UnwrittenEntry {
+        section: "1. 输出练习".into(),
+        line: 14,
+        checked: false,
+        problem_id: None,
+        title: "没有题号的一行".into(),
+    };
+
+    let err = create_chapter_from_entry(
+        &scratch.blog,
+        &book.as_book_ref(),
+        &entry,
+        "Example Author",
+        true,
+    )
+    .expect_err("an entry with no problem id cannot be created");
+    assert!(matches!(err, ChapterError::MissingProblemId { line: 14 }), "got {err:?}");
+
+    assert_eq!(
+        before,
+        std::fs::read_to_string(&index_path).expect("index readable"),
+        "outline must be byte-identical after a refusal"
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch.root);
 }
 
 #[test]
