@@ -1,0 +1,6 @@
+# Shell scripts are run on Linux, where a CRLF shebang is fatal
+# ("./install.sh" fails with "bad interpreter: /usr/bin/env bash\r"). This
+# machine has core.autocrlf=true, so without these lines a checkout rewrites
+# them and the Linux tarball ships scripts that will not run.
+*.sh text eol=lf
+*.desktop.in text eol=lf

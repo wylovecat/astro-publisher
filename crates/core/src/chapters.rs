@@ -101,6 +101,91 @@ pub fn chapter_body_template() -> String {
     "\n## 题目描述\n\n\n## 输入格式\n\n\n## 输出格式\n\n\n## 题目分析\n\n\n## 代码实现\n\n```cpp\n\n```\n".to_owned()
 }
 
+/// Values a chapter template may interpolate.
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateVars<'a> {
+    pub problem_id: &'a str,
+    /// Full problem name, e.g. `【深基3.例1】数字比较`.
+    pub title: &'a str,
+    /// Site-wide sequence slug, e.g. `_0x0013`.
+    pub slug: &'a str,
+    /// The counter behind it, e.g. `0x0013`.
+    pub counter: &'a str,
+    pub book_title: &'a str,
+    pub author: &'a str,
+    /// Site-style timestamp (`2026-10-16T09:30:00.000+08:00`).
+    pub date: &'a str,
+}
+
+/// Fill `{{name}}` placeholders in a body template.
+///
+/// Placeholders are `{{problem_id}}`, `{{title}}`, `{{slug}}`, `{{counter}}`,
+/// `{{book_title}}`, `{{author}}`, `{{date}}`.
+///
+/// An **unknown** placeholder is left as written rather than replaced with an
+/// empty string: a template that silently loses `{{section_heading}}` produces
+/// chapters with a missing section, and an empty hole is much harder to notice
+/// than one that is still spelled out. Whitespace inside the braces is ignored,
+/// so `{{ title }}` works too.
+pub fn render_template(template: &str, vars: &TemplateVars<'_>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        let (before, tail) = rest.split_at(start);
+        out.push_str(before);
+
+        let Some(end) = tail.find("}}") else {
+            // Unterminated: the rest is literal text, not a placeholder.
+            out.push_str(tail);
+            return out;
+        };
+        let name = tail[2..end].trim();
+        let after = &tail[end + 2..];
+
+        match value_of(name, vars) {
+            Some(value) => out.push_str(value),
+            None => {
+                out.push_str("{{");
+                out.push_str(name);
+                out.push_str("}}");
+            }
+        }
+        rest = after;
+    }
+
+    out.push_str(rest);
+    out
+}
+
+fn value_of<'a>(name: &str, vars: &TemplateVars<'a>) -> Option<&'a str> {
+    Some(match name {
+        "problem_id" => vars.problem_id,
+        "title" => vars.title,
+        "slug" => vars.slug,
+        "counter" => vars.counter,
+        "book_title" => vars.book_title,
+        "author" => vars.author,
+        "date" => vars.date,
+        _ => return None,
+    })
+}
+
+/// The body a new chapter should start from.
+///
+/// `template` is the user's configured file, or `None` for the built-in
+/// skeleton. Nothing else decides this, so every front end produces the same
+/// chapter from the same inputs.
+pub fn chapter_body(template: Option<&str>, vars: &TemplateVars<'_>) -> String {
+    // Empty-checked without trimming the value: `str::trim` would also eat the
+    // template's own leading/trailing newlines, which is how a body ends up
+    // glued to the next frontmatter field.
+    match template {
+        Some(template) if !template.trim().is_empty() => render_template(template, vars),
+        _ => chapter_body_template(),
+    }
+}
+
 /// Build the frontmatter for a new chapter.
 pub fn chapter_frontmatter(
     counter: u32,
@@ -258,6 +343,7 @@ pub fn create_chapter(
     blog_dir: &Path,
     book: &BookRef,
     input: &NewChapter,
+    body_template: Option<&str>,
 ) -> Result<ChapterOutcome, ChapterError> {
     let group = book.group();
     let file_name = format!("lg-{}.md", input.problem_id.trim());
@@ -364,7 +450,18 @@ pub fn create_chapter(
     );
     let file = MarkdownFile {
         frontmatter,
-        body: chapter_body_template(),
+        body: chapter_body(
+            body_template,
+            &TemplateVars {
+                problem_id: input.problem_id.trim(),
+                title: input.title.trim(),
+                slug: &next_slug,
+                counter: &slug::format_title_counter(counter),
+                book_title: &book.title,
+                author: &input.author,
+                date: &crate::now_local(),
+            },
+        ),
         line_ending: "\n".to_owned(),
         had_bom: true,
     };
@@ -448,9 +545,10 @@ pub fn create_chapter_from_entry(
     entry: &UnwrittenEntry,
     author: &str,
     check_implies_solution: bool,
+    body_template: Option<&str>,
 ) -> Result<ChapterOutcome, ChapterError> {
     let input = input_from_entry(entry, author, check_implies_solution)?;
-    create_chapter(blog_dir, book, &input)
+    create_chapter(blog_dir, book, &input, body_template)
 }
 
 /// Restore the pre-edit state: delete the chapter file, put the outline back.
@@ -586,7 +684,7 @@ mod tests {
         assert!(!preview.chapter_path.exists(), "preview must not create the file");
 
         // The previewed line matches what an actual creation produces.
-        let outcome = create_chapter(&blog, &book_ref(), &input()).expect("creation succeeds");
+        let outcome = create_chapter(&blog, &book_ref(), &input(), None).expect("creation succeeds");
         assert_eq!(outcome.slug, preview.slug);
         assert_eq!(outcome.outline_after, preview.outline_after);
 
@@ -607,7 +705,7 @@ mod tests {
         assert!(preview.inserted_entry, "a missing problem needs a new line");
         assert!(preview.outline_before.is_none());
 
-        let outcome = create_chapter(&blog, &book_ref(), &request).expect("creation succeeds");
+        let outcome = create_chapter(&blog, &book_ref(), &request, None).expect("creation succeeds");
         assert_eq!(outcome.outline_after, preview.outline_after);
 
         let _ = std::fs::remove_dir_all(&base);
@@ -635,5 +733,68 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    fn vars() -> TemplateVars<'static> {
+        TemplateVars {
+            problem_id: "B2620",
+            title: "【深基3.例1】数字比较",
+            slug: "_0x0013",
+            counter: "0x0013",
+            book_title: "《深入浅出程序设计竞赛 基础篇》",
+            author: "Blog Author",
+            date: "2026-10-16T09:30:00.000+08:00",
+        }
+    }
+
+    #[test]
+    fn fills_the_documented_placeholders() {
+        let template = "{{counter}} {{title}}（{{problem_id}}）\n\n## 题目描述\n\n## 代码实现\n";
+        let rendered = render_template(template, &vars());
+        assert!(rendered.starts_with("0x0013 【深基3.例1】数字比较（B2620）\n"));
+        assert!(rendered.contains("## 代码实现"));
+    }
+
+    #[test]
+    fn tolerates_spacing_inside_the_braces() {
+        assert!(render_template("{{ title }}", &vars()).contains("数字比较"));
+    }
+
+    #[test]
+    fn an_unknown_placeholder_is_left_visible_rather_than_emptied() {
+        // Silently dropping `{{section_heading}}` would produce a chapter with
+        // a missing section and nothing to notice it by.
+        let rendered = render_template("a {{nope}} b {{problem_id}}", &vars());
+        assert!(rendered.contains("{{nope}}"), "got {rendered:?}");
+        assert!(rendered.contains("B2620"));
+    }
+
+    #[test]
+    fn an_unterminated_brace_is_literal_text() {
+        assert_eq!(render_template("100% {{ oops", &vars()), "100% {{ oops");
+    }
+
+    #[test]
+    fn no_template_falls_back_to_the_built_in_skeleton() {
+        let body = chapter_body(None, &vars());
+        for heading in ["## 题目描述", "## 输入格式", "## 代码实现"] {
+            assert!(body.contains(heading), "missing {heading}");
+        }
+
+        // An all-whitespace file is treated as "not configured" too.
+        let body = chapter_body(Some("  \n\t"), &vars());
+        assert!(body.contains("## 题目描述"));
+    }
+
+    #[test]
+    fn a_template_file_replaces_the_skeleton_entirely() {
+        let body = chapter_body(Some("## {{title}}\n"), &vars());
+        assert_eq!(body, "## 【深基3.例1】数字比较\n");
+        assert!(!body.contains("题目描述"), "the built-in sections must not linger");
     }
 }

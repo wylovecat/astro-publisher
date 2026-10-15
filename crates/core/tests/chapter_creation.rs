@@ -81,7 +81,7 @@ fn creates_a_chapter_and_updates_the_outline_atomically() {
         check_implies_solution: true,
     };
 
-    let outcome = create_chapter(&scratch.blog, &book.as_book_ref(), &input)
+    let outcome = create_chapter(&scratch.blog, &book.as_book_ref(), &input, None)
         .expect("chapter creation succeeds");
 
     // --- The chapter file exists with the expected frontmatter ---------------
@@ -169,7 +169,7 @@ fn inserts_a_line_when_the_problem_is_not_in_the_outline() {
         check_implies_solution: true,
     };
 
-    let outcome = create_chapter(&scratch.blog, &book.as_book_ref(), &input)
+    let outcome = create_chapter(&scratch.blog, &book.as_book_ref(), &input, None)
         .expect("chapter creation succeeds");
     assert!(outcome.inserted_entry, "a new line had to be inserted");
 
@@ -209,7 +209,7 @@ fn refuses_to_overwrite_an_existing_chapter() {
         check_implies_solution: true,
     };
 
-    let err = create_chapter(&scratch.blog, &book.as_book_ref(), &input)
+    let err = create_chapter(&scratch.blog, &book.as_book_ref(), &input, None)
         .expect_err("must refuse to clobber an existing chapter");
     assert!(matches!(err, ChapterError::ChapterExists(_)), "got {err:?}");
 
@@ -233,7 +233,7 @@ fn reports_an_unknown_section_without_touching_disk() {
         check_implies_solution: true,
     };
 
-    let err = create_chapter(&scratch.blog, &book.as_book_ref(), &input)
+    let err = create_chapter(&scratch.blog, &book.as_book_ref(), &input, None)
         .expect_err("unknown section must fail");
     assert!(matches!(err, ChapterError::SectionNotFound { .. }), "got {err:?}");
 
@@ -307,7 +307,7 @@ fn one_click_creation_from_an_outline_entry_uses_the_books_own_words() {
         &book.as_book_ref(),
         &entry,
         "Example Author",
-        true,
+        true,        None,
     )
     .expect("one-click creation succeeds");
 
@@ -375,7 +375,7 @@ fn one_click_creation_leaves_the_checkbox_alone_when_progress_is_tracked_by_vide
         &book.as_book_ref(),
         &entry,
         "Example Author",
-        false,
+        false,        None,
     )
     .expect("one-click creation succeeds");
 
@@ -420,7 +420,7 @@ fn an_entry_without_a_problem_id_is_refused_before_anything_is_written() {
         &book.as_book_ref(),
         &entry,
         "Example Author",
-        true,
+        true,        None,
     )
     .expect_err("an entry with no problem id cannot be created");
     assert!(matches!(err, ChapterError::MissingProblemId { line: 14 }), "got {err:?}");

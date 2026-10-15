@@ -9,7 +9,12 @@
 //! desktop app ships as a GUI binary with no console of its own, so without that
 //! flag Windows gives each child a brand-new console window: a black window that
 //! flashes on every `git` call and stays on screen for the whole `pnpm build`.
+//!
+//! Spawns are also handed to [`crate::job`], so a child that outlives the app by
+//! accident — the app killed from the task manager, say — does not outlive the
+//! app by design.
 
+use crate::job;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use thiserror::Error;
@@ -261,6 +266,9 @@ pub fn spawn_streaming(
         cwd: cwd.to_path_buf(),
         source,
     })?;
+    if let Some(pid) = child.id() {
+        job::adopt(pid);
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -330,6 +338,9 @@ pub fn spawn_background(
         cwd: cwd.to_path_buf(),
         source,
     })?;
+    if let Some(pid) = child.id() {
+        job::adopt(pid);
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -392,14 +403,35 @@ pub async fn run_collect(
     let mut cmd = Command::new(&resolved);
     cmd.args(args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
+        // Pinned explicitly: `Command::output` used to do this, and dropping it
+        // would send the child's output to the app's own (nonexistent)
+        // console instead of into the pipe this function reads from.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("LANG", "UTF-8")
         .env("LC_ALL", "UTF-8");
     hide_console(&mut cmd);
 
-    let output = cmd.output().await.map_err(|source| ProcessError::Spawn {
+    // Spawned by hand rather than via `Command::output` purely to get the pid:
+    // that is what puts the child in the kill-on-close job, so a `pnpm build`
+    // cannot outlive a killed app. It costs the caller this function's
+    // promise — that the output is captured — so the pipes above are not
+    // optional.
+    let child = cmd.spawn().map_err(|source| ProcessError::Spawn {
         program: resolved.clone(),
         cwd: cwd.to_path_buf(),
         source,
+    })?;
+    if let Some(pid) = child.id() {
+        job::adopt(pid);
+    }
+
+    let output = child.wait_with_output().await.map_err(|source| {
+        ProcessError::Io {
+            program: resolved.clone(),
+            source,
+        }
     })?;
 
     let mut lines = Vec::new();
@@ -468,5 +500,37 @@ mod tests {
     fn a_truncated_escape_does_not_eat_what_follows() {
         assert_eq!(strip_ansi("done\u{1b}"), "done");
         assert_eq!(strip_ansi("done\u{1b}["), "done");
+    }
+
+    /// `run_collect` has to capture the child's output.
+    ///
+    /// It spawns by hand rather than through `Command::output`, and that only
+    /// works if the pipes are requested explicitly — without them the child
+    /// writes to the app's inherited (nonexistent) console and the caller gets
+    /// an empty string back. That failure is invisible until something reads
+    /// stdout: `git status` looked like "the working tree is clean", and the
+    /// publish pipeline could not even resolve the current branch.
+    #[test]
+    fn run_collect_returns_what_the_child_printed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime");
+
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/c", "echo", "captured-ok"])
+        } else {
+            ("sh", &["-c", "echo captured-ok"])
+        };
+
+        let output = runtime
+            .block_on(run_collect(program, args, std::path::Path::new(".")))
+            .expect("the command succeeds");
+
+        assert!(
+            output.stdout_text().contains("captured-ok"),
+            "stdout was {:?} — the child's output escaped the pipe",
+            output.stdout_text()
+        );
     }
 }

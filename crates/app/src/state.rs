@@ -5,9 +5,100 @@
 //! same answers; they are re-exported here so views keep importing them from
 //! `crate::state`.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub use astro_publisher_core::config::{Config, looks_like_repo};
+
+/// Files this session of the app wrote to, repo-relative.
+///
+/// The publish pipeline needs to know which files "the user" touched, so that
+/// committing does not become a `git add -A` over whatever else the blog
+/// checkout happens to contain (plan §5, step 3). Every write path registers
+/// here: saving a post, pasting an image, creating a chapter, editing an outline.
+///
+/// Cloning shares one set, which is how the views get it: each of them is a
+/// separate gpui entity, and a shared handle is simpler than threading an
+/// event back to the app shell from each of them.
+#[derive(Clone, Default)]
+pub struct SessionFiles(Arc<Mutex<BTreeSet<String>>>);
+
+impl SessionFiles {
+    /// Record a file the session changed. Returns false if it already was in
+    /// the set, so callers can ignore duplicates.
+    ///
+    /// Absolute paths are made repo-relative; anything outside the repository
+    /// is kept verbatim, because refusing it would hide the write rather than
+    /// surface it.
+    pub fn record(&self, repo: &Path, path: &Path) -> bool {
+        let relative = path
+            .strip_prefix(repo)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.is_empty() {
+            return false;
+        }
+        self.0.lock().expect("session file set").insert(relative)
+    }
+
+    /// Whether this session wrote the given repo-relative path.
+    pub fn contains(&self, path: &str) -> bool {
+        self.0
+            .lock()
+            .expect("session file set")
+            .contains(&path.replace('\\', "/"))
+    }
+
+    /// How many files this session has written.
+    pub fn len(&self) -> usize {
+        self.0.lock().expect("session file set").len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_paths_are_stored_relative_to_the_repository() {
+        let files = SessionFiles::default();
+        assert!(
+            files.record(
+                Path::new("/srv/blog"),
+                Path::new("/srv/blog/src/data/blog/lgj/lg-B2620.md")
+            )
+        );
+        assert!(files.contains("src/data/blog/lgj/lg-B2620.md"));
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn the_same_file_is_recorded_once() {
+        let files = SessionFiles::default();
+        assert!(files.record(Path::new("/srv/blog"), Path::new("/srv/blog/a.md")));
+        assert!(!files.record(Path::new("/srv/blog"), Path::new("/srv/blog/a.md")));
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn membership_ignores_windows_separators() {
+        let files = SessionFiles::default();
+        files.record(Path::new(r"C:\blog"), Path::new(r"C:\blog\public\images\a.png"));
+        assert!(files.contains("public/images/a.png"));
+        assert!(files.contains(r"public\images\a.png"));
+        assert!(!files.contains("public/images/b.png"));
+    }
+
+    #[test]
+    fn a_clone_shares_one_set() {
+        let files = SessionFiles::default();
+        let clone = files.clone();
+        clone.record(Path::new("/srv/blog"), Path::new("/srv/blog/a.md"));
+        assert!(files.contains("a.md"), "views share the session's files");
+    }
+}
 
 /// Which section of the app is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

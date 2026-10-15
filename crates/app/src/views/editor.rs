@@ -14,6 +14,7 @@
 //! rehype-katex does, and the plugin draws the result natively.
 
 use crate::live_preview::LivePreview;
+use crate::state::SessionFiles;
 use crate::views::preview_math::MathPlugin;
 use astro_publisher_core::{images, preview, text_stats};
 use gpui::prelude::*;
@@ -35,6 +36,9 @@ pub struct EditorView {
     pub source: Entity<EditorState>,
     /// Repository root, for resolving where pasted images go.
     repo: std::path::PathBuf,
+    /// Files this session wrote, so publishing commits what the user edited
+    /// rather than the whole working tree.
+    session: SessionFiles,
     /// The app-owned `astro dev` server behind the "real preview" button. It is
     /// a separate entity because it outlives this view: a fresh `EditorView` is
     /// built for every post opened, and a server owned here would be killed on
@@ -53,6 +57,7 @@ impl EditorView {
     pub fn new(
         row: crate::state::PostRow,
         repo: std::path::PathBuf,
+        session: SessionFiles,
         live_preview: Entity<LivePreview>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -81,6 +86,7 @@ impl EditorView {
             row,
             source,
             repo,
+            session,
             live_preview,
             handle: cx.weak_entity(),
             preview_source: body,
@@ -88,6 +94,16 @@ impl EditorView {
             dirty: false,
             status: "已载入".to_owned(),
         }
+    }
+
+    /// Whether the buffer has edits that are not on disk yet.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Title of the post, for the "unsaved changes" prompt.
+    pub fn title(&self) -> &str {
+        &self.row.title
     }
 
     /// Recompute the preview and statistics from the current buffer.
@@ -107,6 +123,9 @@ impl EditorView {
             Ok(()) => {
                 self.dirty = false;
                 self.status = "已保存".to_owned();
+                // Only a file that actually reached disk is a file the publish
+                // pipeline may stage.
+                self.session.record(&self.repo, &self.row.path);
             }
             Err(err) => {
                 self.status = format!("保存失败：{err}");
@@ -252,9 +271,17 @@ impl Render for EditorView {
                                         let stem = post_stem(&self.row.path);
                                         let source = self.source.clone();
                                         let status = self.handle.clone();
+                                        let session = self.session.clone();
                                         move |item, window, cx| {
                                             paste_image(
-                                                &repo, &stem, &source, &status, item, window, cx,
+                                                &repo,
+                                                &stem,
+                                                &session,
+                                                &source,
+                                                &status,
+                                                item,
+                                                window,
+                                                cx,
                                             )
                                         }
                                     }),
@@ -338,6 +365,7 @@ fn post_stem(path: &std::path::Path) -> String {
 fn paste_image(
     repo: &std::path::Path,
     post_stem: &str,
+    session: &SessionFiles,
     source: &Entity<EditorState>,
     status: &WeakEntity<EditorView>,
     item: &gpui::ClipboardItem,
@@ -362,6 +390,9 @@ fn paste_image(
         let markdown = images::markdown_reference(&stored.url_path, "");
         // Insert at the caret so the reference lands where the user pasted.
         source.update(cx, |state, cx| state.insert(markdown, window, cx));
+        // The image is already on disk — it does not wait for a save — so it is
+        // already this session's business to commit.
+        session.record(repo, &stored.path);
         stored.url_path
     });
 
