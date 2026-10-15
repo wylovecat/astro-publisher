@@ -235,3 +235,95 @@ fn sections_are_addressable_by_heading_text() {
         section.entries.len()
     );
 }
+
+#[test]
+fn unwritten_lists_only_entries_whose_solution_is_a_placeholder() {
+    let (outline, _) = read(BASIC_INDEX);
+    let unwritten = outline.unwritten();
+
+    // Everything with a linked 题解 is written and must not be offered again.
+    for entry in &unwritten {
+        let original = outline
+            .entries
+            .iter()
+            .find(|e| e.line == entry.line)
+            .expect("line still present");
+        assert_eq!(
+            original.solution,
+            Marker::Placeholder,
+            "line {} is not an unwritten entry",
+            entry.line
+        );
+    }
+
+    // Written and unwritten partition the outline exactly: nothing is offered
+    // twice and nothing is hidden.
+    let linked = outline
+        .entries
+        .iter()
+        .filter(|e| e.solution.is_linked())
+        .count();
+    assert_eq!(linked + unwritten.len(), outline.entries.len());
+
+    let ids: Vec<&str> = unwritten
+        .iter()
+        .map(|e| e.problem_id.as_deref().unwrap_or("?"))
+        .collect();
+    assert!(ids.contains(&"B1002"), "unchecked placeholder: {ids:?}");
+    assert!(ids.contains(&"P2003"), "unchecked placeholder: {ids:?}");
+    assert!(
+        !ids.contains(&"B1000") && !ids.contains(&"B1010"),
+        "linked entries must be excluded: {ids:?}"
+    );
+}
+
+#[test]
+fn unwritten_keeps_the_section_of_a_duplicated_problem_id() {
+    let (outline, _) = read(BASIC_INDEX);
+
+    // P2009 appears under two different headings, and creation targets one of
+    // them — so the section has to travel with the entry.
+    let unwritten = outline.unwritten();
+    let sections: Vec<&str> = unwritten
+        .iter()
+        .filter(|e| e.problem_id.as_deref() == Some("P2009"))
+        .map(|e| e.section.as_str())
+        .collect();
+
+    assert_eq!(sections.len(), 2, "P2009 appears twice: {sections:?}");
+    assert!(sections.contains(&"2.4 额外加练"), "{sections:?}");
+    assert!(sections.contains(&"3. 分支结构"), "{sections:?}");
+}
+
+#[test]
+fn the_advanced_book_reports_checked_entries_as_unwritten_solutions() {
+    // 进阶篇 tracks progress with videos: `[x]` plus a linked 视频 but a plain
+    // 📖题解 placeholder. Those problems still have no solution post, so they
+    // must be offered — and linking a solution is not what ticks their box.
+    let (outline, _) = read(ADVANCED_INDEX);
+    let unwritten = outline.unwritten();
+
+    assert_eq!(unwritten.len(), outline.entries.len());
+    assert!(
+        outline
+            .entries
+            .iter()
+            .filter(|e| e.checked)
+            .all(|e| e.video.is_linked()),
+        "in this book a ticked box is driven by a video link"
+    );
+
+    let done = unwritten
+        .iter()
+        .find(|e| e.problem_id.as_deref() == Some("P3001"))
+        .expect("P3001 is listed but has no 题解 link");
+    assert!(done.checked, "its box is already ticked by the video");
+    assert_eq!(done.section, "1.1 双指针");
+
+    let todo = unwritten
+        .iter()
+        .find(|e| e.problem_id.as_deref() == Some("P3008"))
+        .expect("P3008 is listed but unwritten");
+    assert!(!todo.checked);
+    assert_eq!(todo.section, "2.1 并查集");
+}

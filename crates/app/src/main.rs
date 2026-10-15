@@ -45,6 +45,9 @@ pub struct PublisherApp {
     /// Chapter wizard, created the first time the view is opened so its inputs
     /// and running state survive switching pages.
     chapter_wizard: Option<Entity<views::chapter::ChapterWizard>>,
+    /// Outline page, kept for the same reason: a creation in flight must not be
+    /// dropped because the user looked at another page.
+    outline_view: Option<views::outline::OutlineEntity>,
     /// Publish panel, kept for the same reason: a run in flight must not be
     /// dropped because the user looked at another page.
     publish_panel: Option<Entity<views::publish::PublishView>>,
@@ -83,6 +86,7 @@ impl PublisherApp {
             posts: Vec::new(),
             open_post: None,
             chapter_wizard: None,
+            outline_view: None,
             publish_panel: None,
             live_preview: None,
             repo_input: None,
@@ -200,6 +204,31 @@ impl PublisherApp {
             views::chapter::ChapterWizard::new(self.config.clone(), window, cx)
         });
         self.chapter_wizard = Some(entity.clone());
+        entity
+    }
+
+    fn outline_entity(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> views::outline::OutlineEntity {
+        if let Some(existing) = &self.outline_view {
+            return existing.clone();
+        }
+        let entity = cx.new(|cx| views::outline::OutlineView::new(self.config.clone(), window, cx));
+        // A chapter created from the outline is a new file, so the post list is
+        // stale the moment it lands.
+        cx.subscribe(
+            &entity,
+            |this, _, event: &views::outline::OutlineEvent, cx| match event {
+                views::outline::OutlineEvent::Created { title_line } => {
+                    this.refresh_posts(cx);
+                    this.set_notice(format!("已创建 {title_line}，文章列表已刷新"), cx);
+                }
+            },
+        )
+        .detach();
+        self.outline_view = Some(entity.clone());
         entity
     }
 
@@ -362,7 +391,12 @@ impl PublisherApp {
                 .size_full()
                 .child(self.chapter_entity(window, cx))
                 .into_any_element(),
-            View::Outline => views::outline::render(&self.config, cx).into_any_element(),
+            View::Outline => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(self.outline_entity(window, cx))
+                .into_any_element(),
             View::Publish => div()
                 .flex()
                 .flex_col()

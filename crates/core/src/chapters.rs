@@ -11,7 +11,9 @@
 //! (plan §3.2, step 6).
 
 use crate::frontmatter::{Frontmatter, MarkdownFile};
-use crate::outline::{ListMarker, Marker, Outline, OutlineEntry, render_entry};
+use crate::outline::{
+    ListMarker, Marker, Outline, OutlineEntry, UnwrittenEntry, render_entry,
+};
 use crate::slug;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -28,6 +30,8 @@ pub enum ChapterError {
     SectionNotFound { section: String, file: String },
     #[error("chapter file already exists: {0}")]
     ChapterExists(String),
+    #[error("the outline entry on line {line} has no problem id, so no chapter file can be named after it")]
+    MissingProblemId { line: usize },
     #[error("outline did not contain the new chapter link after writing; rolled back")]
     SelfCheckFailed,
     #[error("rollback failed for {path}: {source}")]
@@ -404,6 +408,49 @@ pub fn create_chapter(
         outline_after: render_entry(&updated_entry),
         inserted_entry: inserted,
     })
+}
+
+/// Build the creation input for an outline entry that has no 题解 link yet.
+///
+/// The only fields the wizard asks for are already in the outline (problem id,
+/// title, owning section), so this is the "one click" path: no form, no preview,
+/// nothing to mistype.
+pub fn input_from_entry(
+    entry: &UnwrittenEntry,
+    author: &str,
+    check_implies_solution: bool,
+) -> Result<NewChapter, ChapterError> {
+    let problem_id = entry
+        .problem_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or(ChapterError::MissingProblemId { line: entry.line })?;
+
+    Ok(NewChapter {
+        problem_id: problem_id.to_owned(),
+        title: entry.title.trim().to_owned(),
+        section: entry.section.trim().to_owned(),
+        video_url: None,
+        author: author.to_owned(),
+        check_implies_solution,
+    })
+}
+
+/// Create the chapter for an outline entry that has no 题解 link yet.
+///
+/// Thin wrapper over [`create_chapter`] for the outline page's one-click button:
+/// everything it needs is already on the entry. Errors are the same ones
+/// `create_chapter` raises, so the caller reports them unchanged.
+pub fn create_chapter_from_entry(
+    blog_dir: &Path,
+    book: &BookRef,
+    entry: &UnwrittenEntry,
+    author: &str,
+    check_implies_solution: bool,
+) -> Result<ChapterOutcome, ChapterError> {
+    let input = input_from_entry(entry, author, check_implies_solution)?;
+    create_chapter(blog_dir, book, &input)
 }
 
 /// Restore the pre-edit state: delete the chapter file, put the outline back.
