@@ -20,7 +20,7 @@
 //! server logs).
 
 use astro_publisher_core::config::Config;
-use astro_publisher_core::{books, chapters, posts, problem, publish, validate};
+use astro_publisher_core::{books, chapters, outline, posts, problem, publish, validate};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -98,6 +98,47 @@ struct CreateChapterArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreatePostArgs {
+    /// Subdirectory under the blog root, e.g. `solu`. Omit or pass "" for the
+    /// blog root.
+    #[serde(default)]
+    group: Option<String>,
+    /// File stem without extension. Defaults to a slugified `title`.
+    #[serde(default)]
+    file_name: Option<String>,
+    title: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    /// Create as a draft: invisible on the site until it is published.
+    #[serde(default)]
+    draft: Option<bool>,
+    /// Explicit frontmatter slug. Empty means the URL uses the file name.
+    #[serde(default)]
+    slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct LinkArgs {
+    /// Book id from `list_books`.
+    book_id: String,
+    /// Luogu problem id, e.g. `B2620`.
+    problem_id: String,
+    /// Outline section, exactly as `list_sections` reports it. Required when the
+    /// same problem id appears under more than one section.
+    #[serde(default)]
+    section: Option<String>,
+    /// For `link_solution`: the post's site URL, e.g. `/posts/lgj/_0x0013`.
+    #[serde(default)]
+    post_url: Option<String>,
+    /// For `link_video`: the external video URL.
+    #[serde(default)]
+    video_url: Option<String>,
+    /// For `set_check`: the new checkbox state. Required by that tool.
+    #[serde(default)]
+    checked: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PublishArgs {
     /// Commit message.
     message: String,
@@ -142,6 +183,33 @@ impl BlogServer {
         books::get_book(&repo, book_id)
             .map(|book| book.as_book_ref())
             .map_err(|err| err.to_string())
+    }
+
+    /// Path of a book's outline post, resolved from its id.
+    fn outline_path(&self, book_id: &str) -> Result<std::path::PathBuf, String> {
+        let repo = self.repo()?;
+        let book = books::get_book(&repo, book_id).map_err(|err| err.to_string())?;
+        Ok(repo.join("src/data/blog").join(book.index_path()))
+    }
+
+    /// Turn a completed outline edit into the tool result, which carries the
+    /// line before and after: an assistant pasting one line into a file the user
+    /// also edits by hand needs to be able to show what changed.
+    fn edit_result(
+        edit: Result<outline::LineEdit, outline::OutlineError>,
+        what: &str,
+    ) -> CallToolResult {
+        match edit {
+            Ok(edit) => tool_json(json!({
+                "changed": what,
+                "path": edit.path.display().to_string(),
+                "line": edit.line + 1,
+                "section": edit.section,
+                "before": edit.before,
+                "after": edit.after,
+            })),
+            Err(err) => tool_error(format!("{what}失败：{err}")),
+        }
     }
 }
 
@@ -365,7 +433,19 @@ impl BlogServer {
             check_implies_solution: args.check_implies_solution.unwrap_or(true),
         };
 
-        match chapters::create_chapter(&repo.join("src/data/blog"), &book, &input) {
+        // Read before writing: a configured-but-unreadable template has to fail
+        // the call, not quietly produce a chapter from a different skeleton.
+        let template = match self.config.chapter_template_text(&repo) {
+            Ok(template) => template,
+            Err(message) => return tool_error(message),
+        };
+
+        match chapters::create_chapter(
+            &repo.join("src/data/blog"),
+            &book,
+            &input,
+            template.as_deref(),
+        ) {
             Ok(outcome) => tool_json(json!({
                 "chapter_path": outcome.chapter_path.display().to_string(),
                 "slug": outcome.slug,
@@ -375,6 +455,109 @@ impl BlogServer {
             })),
             Err(err) => tool_error(format!("创建章节失败：{err}")),
         }
+    }
+
+    #[tool(
+        description = "Create a plain post (not a course chapter) with the standard frontmatter. Returns its path and URL."
+    )]
+    fn create_post(&self, Parameters(args): Parameters<CreatePostArgs>) -> CallToolResult {
+        let repo = match self.repo() {
+            Ok(repo) => repo,
+            Err(message) => return tool_error(message),
+        };
+
+        let file_name = args
+            .file_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| posts::slugify_stem(&args.title));
+
+        let input = posts::NewPost {
+            group: args.group.unwrap_or_default(),
+            file_name: file_name.clone(),
+            title: args.title.clone(),
+            description: format!("{}。", args.title.trim()),
+            tags: args.tags,
+            slug: args.slug,
+            draft: args.draft.unwrap_or(false),
+            featured: false,
+            author: self.config.author.clone(),
+        };
+
+        match posts::create_post(&repo.join("src/data/blog"), &input) {
+            Ok(post) => tool_json(json!({
+                "relative": post.relative,
+                "url": post.url_path(),
+                "draft": post.frontmatter.draft.unwrap_or(false),
+            })),
+            Err(err) => tool_error(format!("创建文章失败：{err}")),
+        }
+    }
+
+    #[tool(
+        description = "Link an outline entry's 📖 solution marker to an existing post. Use when the chapter was written outside the tool, or to repoint a link. Does NOT touch the [x] checkbox — what [x] means differs per book, so use set_check for that."
+    )]
+    fn link_solution(&self, Parameters(args): Parameters<LinkArgs>) -> CallToolResult {
+        let path = match self.outline_path(&args.book_id) {
+            Ok(path) => path,
+            Err(message) => return tool_error(message),
+        };
+        let Some(post_url) = args.post_url else {
+            return tool_error("link_solution 需要 post_url（站内路径，如 /posts/lgj/_0x0013）".to_owned());
+        };
+
+        Self::edit_result(
+            outline::set_link(
+                &path,
+                &args.problem_id,
+                args.section.as_deref(),
+                outline::MarkerKind::Solution,
+                &post_url,
+            ),
+            "关联题解",
+        )
+    }
+
+    #[tool(
+        description = "Link an outline entry's 📺 video marker to a published video URL (Bilibili etc.). Does NOT touch the [x] checkbox."
+    )]
+    fn link_video(&self, Parameters(args): Parameters<LinkArgs>) -> CallToolResult {
+        let path = match self.outline_path(&args.book_id) {
+            Ok(path) => path,
+            Err(message) => return tool_error(message),
+        };
+        let Some(video_url) = args.video_url else {
+            return tool_error("link_video 需要 video_url".to_owned());
+        };
+
+        Self::edit_result(
+            outline::set_link(
+                &path,
+                &args.problem_id,
+                args.section.as_deref(),
+                outline::MarkerKind::Video,
+                &video_url,
+            ),
+            "关联视频",
+        )
+    }
+
+    #[tool(
+        description = "Tick or untick an outline entry's [x] checkbox. Explicit because the meaning differs per book: the basic book tracks written 题解, the advanced book tracks videos. Call list_sections first to get the exact section text."
+    )]
+    fn set_check(&self, Parameters(args): Parameters<LinkArgs>) -> CallToolResult {
+        let path = match self.outline_path(&args.book_id) {
+            Ok(path) => path,
+            Err(message) => return tool_error(message),
+        };
+        let Some(checked) = args.checked else {
+            return tool_error("set_check 需要 checked（true 勾选，false 取消）".to_owned());
+        };
+
+        Self::edit_result(
+            outline::set_checked(&path, &args.problem_id, args.section.as_deref(), checked),
+            if checked { "勾选" } else { "取消勾选" },
+        )
     }
 
     #[tool(
@@ -394,6 +577,10 @@ impl BlogServer {
             dry_run: args.dry_run.unwrap_or(true),
             git_remote: self.config.git_remote.clone(),
             git_branch: self.config.git_branch.clone(),
+            // An assistant call has no session behind it to draw a file list
+            // from, so this keeps the historical "stage everything" behaviour
+            // rather than inventing a selection the user never confirmed.
+            stage_paths: None,
         };
 
         // Collect the pipeline's own log lines so the assistant can report what
@@ -437,7 +624,7 @@ impl BlogServer {
 
 #[tool_handler(
     name = "astro-publisher",
-    instructions = "Content operations for an Astro blog: list and read posts, inspect course books and their outline sections, look up Luogu problem metadata, validate the content tree, and create course chapters. Create and publish tools write to the repository; preview_chapter is read-only and should be used first. publish defaults to a dry run."
+    instructions = "Content operations for an Astro blog: list and read posts, create posts and course chapters, maintain a course outline (link solutions and videos, tick entries), look up Luogu problem metadata, validate the content tree, and publish. Create, link and publish tools write to the repository; preview_chapter is read-only and should be used first. Call list_sections before editing an outline entry so the section text matches exactly. publish defaults to a dry run."
 )]
 impl ServerHandler for BlogServer {}
 

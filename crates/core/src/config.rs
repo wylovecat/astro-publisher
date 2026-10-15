@@ -27,6 +27,16 @@ pub struct Config {
     /// Whether the publish pipeline runs `pnpm build` before committing.
     #[serde(default = "default_true")]
     pub run_local_build: bool,
+    /// Body template for newly created chapters, as a path.
+    ///
+    /// Empty means the built-in skeleton (`chapters::chapter_body_template`).
+    /// A path, not inline text, because a template is something you want to edit
+    /// and keep under version control next to the blog, and because `config.toml`
+    /// is per-machine while the template is a property of the blog.
+    ///
+    /// Relative paths resolve against the repository root.
+    #[serde(default)]
+    pub chapter_template: String,
 }
 
 fn default_true() -> bool {
@@ -48,15 +58,57 @@ impl Default for Config {
             git_branch: "main".to_owned(),
             eo_console_url: "https://console.cloud.tencent.com/edgeone/pages".to_owned(),
             run_local_build: true,
+            chapter_template: String::new(),
         }
     }
 }
 
 impl Config {
+    /// The directory holding this tool's per-user state.
+    ///
+    /// Home for anything that is not a setting — the single-instance lock lives
+    /// here, beside `config.toml` rather than inside it.
+    pub fn dir() -> Option<PathBuf> {
+        directories::ProjectDirs::from("dev", "astro-publisher", "astro-publisher")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+    }
+
     /// Path of the settings file (`config.toml`).
     pub fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("dev", "astro-publisher", "astro-publisher")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
+        Self::dir().map(|dir| dir.join("config.toml"))
+    }
+
+    /// The chapter body template to use, read from disk.
+    ///
+    /// `Ok(None)` means "use the built-in skeleton". A template that is
+    /// configured but unreadable is an **error**, not a silent fallback:
+    /// quietly generating chapters from a different template than the one that
+    /// is configured is the kind of mistake that surfaces weeks later, as a
+    /// published chapter with the wrong sections.
+    ///
+    /// Relative paths resolve against the repository root, so a template can
+    /// live next to the content it belongs to and be version-controlled.
+    pub fn chapter_template_text(&self, repo: &Path) -> Result<Option<String>, String> {
+        let configured = self.chapter_template.trim();
+        if configured.is_empty() {
+            return Ok(None);
+        }
+
+        let candidate = Path::new(configured);
+        let path = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            repo.join(candidate)
+        };
+
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) => Err(format!(
+                "章节模板读不到：{}（{err}）。\
+                 修好文件或清空 config.toml 的 chapter_template 以回到内置骨架。",
+                path.display()
+            )),
+        }
     }
 
     /// Load the configuration, falling back to defaults.
@@ -70,6 +122,17 @@ impl Config {
             Some(text) => toml::from_str(&text).unwrap_or_default(),
             None => Self::default(),
         };
+
+        // Same idea for the chapter template, applied first because the
+        // repository override below returns early. Useful for trying a template
+        // without editing the user's settings, and for machines where the
+        // template lives somewhere else.
+        if let Ok(template) = std::env::var("ASTRO_PUBLISHER_CHAPTER_TEMPLATE") {
+            let trimmed = template.trim();
+            if !trimmed.is_empty() {
+                config.chapter_template = trimmed.to_owned();
+            }
+        }
 
         // An explicit override always wins.
         if let Ok(repo) = std::env::var("ASTRO_PUBLISHER_REPO") {

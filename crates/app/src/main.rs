@@ -22,26 +22,32 @@
 //! `Root` at the top level.
 
 mod live_preview;
+mod single_instance;
 mod state;
 mod views;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds, WindowOptions, div, px,
-    size,
+    App, Bounds, Context, Entity, IntoElement, Render, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, px, size,
 };
-use gpui_component::{ActiveTheme, Root, Sizable, TitleBar, button::{Button, ButtonVariants}, input::InputState, label::Label};
+use gpui_component::{ActiveTheme, Root, Sizable, TitleBar, WindowExt, button::{Button, ButtonVariants}, input::InputState, label::Label};
 use gpui_platform::application;
 
-use state::{Config, View};
+use state::{Config, SessionFiles, View};
 
 /// The application shell: sidebar navigation plus the active view.
 pub struct PublisherApp {
     config: Config,
+    /// Files this session wrote, shared with every view that writes.
+    session: SessionFiles,
     view: View,
     posts: Vec<state::PostRow>,
     /// Currently open post, when the editor view is active.
     open_post: Option<Entity<views::editor::EditorView>>,
+    /// Set once the user has answered "discard and exit", so the close handler
+    /// stops asking.
+    force_close: bool,
     /// Chapter wizard, created the first time the view is opened so its inputs
     /// and running state survive switching pages.
     chapter_wizard: Option<Entity<views::chapter::ChapterWizard>>,
@@ -82,9 +88,11 @@ impl PublisherApp {
 
         let mut app = Self {
             config,
+            session: SessionFiles::default(),
             view: View::Posts,
             posts: Vec::new(),
             open_post: None,
+            force_close: false,
             chapter_wizard: None,
             outline_view: None,
             publish_panel: None,
@@ -201,7 +209,12 @@ impl PublisherApp {
             return existing.clone();
         }
         let entity = cx.new(|cx| {
-            views::chapter::ChapterWizard::new(self.config.clone(), window, cx)
+            views::chapter::ChapterWizard::new(
+                self.config.clone(),
+                self.session.clone(),
+                window,
+                cx,
+            )
         });
         self.chapter_wizard = Some(entity.clone());
         entity
@@ -215,7 +228,14 @@ impl PublisherApp {
         if let Some(existing) = &self.outline_view {
             return existing.clone();
         }
-        let entity = cx.new(|cx| views::outline::OutlineView::new(self.config.clone(), window, cx));
+        let entity = cx.new(|cx| {
+            views::outline::OutlineView::new(
+                self.config.clone(),
+                self.session.clone(),
+                window,
+                cx,
+            )
+        });
         // A chapter created from the outline is a new file, so the post list is
         // stale the moment it lands.
         cx.subscribe(
@@ -240,8 +260,14 @@ impl PublisherApp {
         if let Some(existing) = &self.publish_panel {
             return existing.clone();
         }
-        let entity =
-            cx.new(|cx| views::publish::PublishView::new(self.config.clone(), window, cx));
+        let entity = cx.new(|cx| {
+            views::publish::PublishView::new(
+                self.config.clone(),
+                self.session.clone(),
+                window,
+                cx,
+            )
+        });
         self.publish_panel = Some(entity.clone());
         entity
     }
@@ -260,11 +286,38 @@ impl PublisherApp {
         let repo = self.config.repo();
         let preview = self.live_preview_entity(cx);
         let entity = cx.new(|cx| {
-            views::editor::EditorView::new(row.clone(), repo, preview, window, cx)
+            views::editor::EditorView::new(
+                row.clone(),
+                repo,
+                self.session.clone(),
+                preview,
+                window,
+                cx,
+            )
         });
         self.open_post = Some(entity);
         self.view = View::Editor;
         cx.notify();
+    }
+
+    /// The title of the post with unsaved edits, if there is one.
+    ///
+    /// Read by the window-close handler, which is not an entity update and so
+    /// cannot hold a borrow across it.
+    pub fn unsaved_post(&self, cx: &App) -> Option<String> {
+        let entity = self.open_post.as_ref()?;
+        let dirty = entity.read(cx).is_dirty();
+        dirty.then(|| entity.read(cx).title().to_owned())
+    }
+
+    /// Let the next close through without asking (plan §4.2).
+    pub fn allow_close(&mut self) {
+        self.force_close = true;
+    }
+
+    /// Whether closing is already allowed.
+    pub fn may_close(&self) -> bool {
+        self.force_close
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -460,6 +513,33 @@ fn main() {
     let open_index = parse_open_index(&args);
     let start_view = parse_view(&args);
 
+    // One instance only (plan §4.2). Two of them would fight over the dev
+    // server port, over the publish pipeline and over the config file. The lock
+    // outlives a crash on purpose: a lock whose owner is dead is taken over, so
+    // a killed app never locks the user out of their own tool.
+    let (_claim, _lock) = match single_instance::claim() {
+        Ok(claimed) => claimed,
+        Err(message) => {
+            eprintln!("✗ {message}");
+            std::process::exit(1);
+        }
+    };
+    if let single_instance::Claim::InUse { pid } = _claim {
+        single_instance::notify_already_running(pid);
+        std::process::exit(0);
+    }
+    if let single_instance::Claim::Acquired {
+        displaced: Some(pid),
+    } = _claim
+    {
+        println!("上一次运行的进程 {pid} 异常退出，已接管实例锁");
+    }
+
+    // Children die with the app, however it dies (plan §4.2): the window-close
+    // hook only runs on a clean close, so the `astro dev` server used to survive
+    // a task-manager kill and keep port 4321.
+    astro_publisher_core::job::install();
+
     // The bundled SVG icons (including the window control glyphs in the title
     // bar) have to be registered on the application itself: `gpui_component::init`
     // does not do it, and unregistered icons render as empty space rather than
@@ -491,12 +571,66 @@ fn main() {
                     }
                     app
                 });
+
+                // Ask before throwing away unsaved edits (plan §4.2). Returning
+                // false vetoes the close, so the answer is never lost.
+                //
+                // The handle is a weak clone rather than the entity itself:
+                // `on_window_should_close` takes an `Fn`, so the callback cannot
+                // hand ownership anywhere, and `Root` below still needs the
+                // entity to render.
+                let closer = app.clone();
+                let closer_weak = app.downgrade();
+                window.on_window_should_close(cx, move |window, cx| {
+                    if closer.read(cx).may_close() {
+                        return true;
+                    }
+                    let Some(title) = closer.read(cx).unsaved_post(cx) else {
+                        return true;
+                    };
+                    confirm_close(window, cx, title, closer_weak.clone());
+                    false
+                });
+
                 cx.new(|cx| Root::new(app, window, cx))
             },
         )
         .expect("failed to open window");
 
         cx.activate(true);
+    });
+}
+
+/// The answer to "there are unsaved edits".
+///
+/// Two buttons, and the destructive one is the affirmative one. A three-way
+/// dialog would also offer "save and quit", but reaching that takes two steps
+/// anyway (cancel, Ctrl+S, close), while making it a button puts a one-click
+/// path to saving an accidental keystroke next to a one-click path to losing
+/// work. The description says so, and the safe answer is the default direction:
+/// the close is vetoed until the user actually chooses.
+fn confirm_close(window: &mut Window, cx: &mut App, title: String, app: WeakEntity<PublisherApp>) {
+    window.open_alert_dialog(cx, move |alert, _window, _cx| {
+        // Cloned per invocation, not moved: the builder is an `Fn`, so a
+        // closure that took the handle by value could only ever run once.
+        let accept = app.clone();
+        alert
+            .title("有未保存的修改")
+            .description(format!(
+                "《{title}》还有没有保存的修改。\n\n\
+                 「放弃并退出」会丢掉它们；要保留就先返回编辑器，按 Ctrl+S 保存后再关窗口。"
+            ))
+            .confirm()
+            .ok_text("放弃并退出")
+            .cancel_text("返回编辑器")
+            .ok_variant(gpui_component::button::ButtonVariant::Danger)
+            .on_ok(move |_, _window, cx| {
+                // A dead entity means the app is already tearing down, which is
+                // the outcome we wanted anyway.
+                let _ = accept.update(cx, |app, _cx| app.allow_close());
+                cx.quit();
+                true
+            })
     });
 }
 

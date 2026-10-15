@@ -208,6 +208,43 @@ pub fn list_tags(blog_dir: &Path) -> Result<Vec<String>, PostError> {
     Ok(tags)
 }
 
+/// A file stem derived from a post title.
+///
+/// ASCII-only and dash-separated, because the stem becomes a file name and,
+/// for a post with no explicit `slug`, the last URL segment. A title written
+/// entirely in CJK has no ASCII to keep, so it falls back to a timestamp rather
+/// than to an empty name — a caller then names the file explicitly.
+pub fn slugify_stem(title: &str) -> String {
+    let ascii: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let collapsed = ascii
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if collapsed.is_empty() {
+        // Same trick the editor uses for pasted image names: keep the leading
+        // digits of the site-style timestamp.
+        let digits: String = crate::now_local().chars().filter(char::is_ascii_digit).collect();
+        let stamp = if digits.len() >= 14 {
+            &digits[..14]
+        } else {
+            digits.as_str()
+        };
+        format!("post-{stamp}")
+    } else {
+        collapsed
+    }
+}
+
 /// Input for creating a plain post (not a course chapter).
 #[derive(Debug, Clone)]
 pub struct NewPost {

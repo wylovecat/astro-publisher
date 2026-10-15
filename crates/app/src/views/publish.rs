@@ -12,14 +12,17 @@
 //! - The build is streamed through `process::spawn_streaming`, which already
 //!   forces UTF-8 on the child; Chinese build output must stay readable.
 
-use crate::state::Config;
+use crate::state::{Config, SessionFiles};
 use astro_publisher_core::process::Stream;
-use astro_publisher_core::publish::{self, PublishError, PublishEvent, StepState, STEP_COUNT, STEP_TITLES};
+use astro_publisher_core::publish::{
+    self, PublishError, PublishEvent, StepState, StatusChange, STEP_COUNT, STEP_TITLES,
+};
 use gpui::prelude::*;
 use gpui::{Context, Entity, IntoElement, Render, Window, div, px};
 use gpui_component::{
     ActiveTheme, Sizable,
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
     input::{Input, InputState},
     label::Label,
     scroll::ScrollableElement,
@@ -31,11 +34,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// view re-renders the whole log on every event.
 const MAX_LOG_LINES: usize = 500;
 
+/// How tall the change list may grow before it scrolls.
+const CHANGES_MAX_HEIGHT: f32 = 168.0;
+
 /// The publish panel.
 pub struct PublishView {
     config: Config,
+    /// Files this session wrote, used to preselect the checklist.
+    session: SessionFiles,
     /// Commit message the pipeline will use.
     message: Entity<InputState>,
+    /// Working-tree changes, each with the user's choice.
+    changes: Vec<ChangeRow>,
+    /// Whether a `git status` is in flight.
+    loading_changes: bool,
     /// Latest status per step, in pipeline order.
     steps: Vec<StepRow>,
     /// Streamed output, oldest first.
@@ -47,6 +59,13 @@ pub struct PublishView {
     notice: String,
 }
 
+/// One row of the change checklist.
+struct ChangeRow {
+    code: String,
+    path: String,
+    selected: bool,
+}
+
 /// One step's rendered state.
 struct StepRow {
     state: StepState,
@@ -54,7 +73,12 @@ struct StepRow {
 }
 
 impl PublishView {
-    pub fn new(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: Config,
+        session: SessionFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let message = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("提交信息，例如：补充 P2003 题解", window, cx);
@@ -66,15 +90,121 @@ impl PublishView {
             state
         });
 
-        Self {
+        let mut view = Self {
             config,
+            session,
             message,
+            changes: Vec::new(),
+            loading_changes: false,
             steps: fresh_steps(),
             log: Vec::new(),
             running: false,
             cancel: Arc::new(AtomicBool::new(false)),
             notice: String::new(),
+        };
+        view.refresh_changes(cx);
+        view
+    }
+
+    /// Re-read `git status` and rebuild the checklist.
+    ///
+    /// Existing choices survive a refresh — a refresh should not silently
+    /// re-decide what the user picked. New rows arrive checked if this session
+    /// wrote them, which is the point of the checklist: publishing commits what
+    /// the user edited here, and anything else is their call to tick.
+    fn refresh_changes(&mut self, cx: &mut Context<Self>) {
+        if !crate::state::looks_like_repo(&self.config.repo()) {
+            self.changes.clear();
+            cx.notify();
+            return;
         }
+
+        self.loading_changes = true;
+        cx.notify();
+
+        let repo = self.config.repo();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Vec<StatusChange>, String>>();
+
+        cx.background_executor()
+            .spawn(async move {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        let _ = tx.send(Err(format!("无法启动异步运行时：{err}")));
+                        return;
+                    }
+                };
+                let result = runtime.block_on(async move {
+                    publish::pending_changes(&repo).await.map_err(|err| err.to_string())
+                });
+                let _ = tx.send(result);
+            })
+            .detach();
+
+        cx.spawn(async move |this, cx| {
+            if let Some(result) = rx.recv().await {
+                this.update(cx, |this, cx| this.apply_changes(result, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    fn apply_changes(&mut self, result: Result<Vec<StatusChange>, String>, cx: &mut Context<Self>) {
+        self.loading_changes = false;
+        match result {
+            Ok(changes) => {
+                let previous: std::collections::HashMap<String, bool> = self
+                    .changes
+                    .iter()
+                    .map(|row| (row.path.clone(), row.selected))
+                    .collect();
+                self.changes = changes
+                    .into_iter()
+                    .map(|change| {
+                        let selected = match previous.get(&change.path) {
+                            Some(choice) => *choice,
+                            None => self.session.contains(&change.path),
+                        };
+                        ChangeRow {
+                            code: change.code,
+                            path: change.path,
+                            selected,
+                        }
+                    })
+                    .collect();
+                if self.changes.is_empty() {
+                    self.notice = "工作区干净，没有可提交的改动。".to_owned();
+                }
+            }
+            Err(message) => {
+                self.changes.clear();
+                self.notice = format!("读取改动列表失败：{message}");
+            }
+        }
+        cx.notify();
+    }
+
+    /// The paths to stage, in the order the checklist shows them.
+    fn selected_paths(&self) -> Vec<std::path::PathBuf> {
+        self.changes
+            .iter()
+            .filter(|row| row.selected)
+            .map(|row| std::path::PathBuf::from(&row.path))
+            .collect()
+    }
+
+    fn set_all(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if self.running {
+            return;
+        }
+        for row in &mut self.changes {
+            row.selected = selected;
+        }
+        cx.notify();
     }
 
     /// Start the pipeline in the background.
@@ -99,6 +229,15 @@ impl PublishView {
             return;
         }
 
+        let selected = self.selected_paths();
+        // Only worth objecting to when there is something to object about: an
+        // untouched working tree is the pipeline's own error to report.
+        if !self.changes.is_empty() && selected.is_empty() {
+            self.notice = "下面一个文件都没勾选，请至少勾选要提交的内容。".to_owned();
+            cx.notify();
+            return;
+        }
+
         let options = publish::PublishOptions {
             repo: self.config.repo(),
             message,
@@ -106,6 +245,7 @@ impl PublishView {
             dry_run,
             git_remote: self.config.git_remote.clone(),
             git_branch: self.config.git_branch.clone(),
+            stage_paths: Some(selected),
         };
 
         self.steps = fresh_steps();
@@ -230,7 +370,135 @@ impl PublishView {
         {
             self.notice = "已停止".to_owned();
         }
-        cx.notify();
+        // Whatever happened, the working tree has moved on — re-read it so the
+        // checklist does not offer files that are already committed.
+        self.refresh_changes(cx);
+    }
+
+    /// The "what will be committed" checklist.
+    ///
+    /// This exists because the pipeline stages an explicit list, and a list the
+    /// user cannot see is just a different `git add -A`: the whole point is to
+    /// show which files are in play before the commit is made, not after.
+    fn changes_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let total = self.changes.len();
+        let picked = self.changes.iter().filter(|row| row.selected).count();
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                Label::new(if self.loading_changes {
+                    "待提交改动：读取中…".to_owned()
+                } else if total == 0 {
+                    "待提交改动：工作区干净".to_owned()
+                } else {
+                    format!("待提交改动：已选 {picked} / {total}")
+                })
+                .text_sm(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .when(total > 0, |el| {
+                        el.child(
+                            Button::new("changes-all")
+                                .label("全选")
+                                .xsmall()
+                                .secondary()
+                                .on_click(cx.listener(|this, _, _, cx| this.set_all(true, cx))),
+                        )
+                        .child(
+                            Button::new("changes-none")
+                                .label("全不选")
+                                .xsmall()
+                                .secondary()
+                                .on_click(cx.listener(|this, _, _, cx| this.set_all(false, cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("changes-refresh")
+                            .label("刷新")
+                            .xsmall()
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_changes(cx))),
+                    ),
+            );
+
+        let hint = if total == 0 {
+            Label::new(format!(
+                "保存文章、创建章节或粘贴图片后，这里会列出本次会话改过的文件（当前 {} 个）。",
+                self.session.len()
+            ))
+            .text_xs()
+            .text_color(muted)
+        } else {
+            Label::new(
+                "默认勾选本次会话在工具里改过的文件；其余改动需要你手动勾选才会被提交。",
+            )
+            .text_xs()
+            .text_color(muted)
+        };
+
+        let rows = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(CHANGES_MAX_HEIGHT))
+            .overflow_y_scrollbar()
+            .when(self.changes.is_empty(), |el| {
+                el.child(Label::new("（没有改动）").text_xs().text_color(muted))
+            })
+            .children(self.changes.iter().enumerate().map(|(index, row)| {
+                let path = row.path.clone();
+                let code = row.code.clone();
+                // The checkbox has no disabled state, so a run in flight turns
+                // the control into a no-op instead of letting the list change
+                // under a pipeline that already captured its selection.
+                let frozen = self.running;
+                Checkbox::new(format!("stage-{index}"))
+                    .checked(row.selected)
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(Label::new(code).text_xs().text_color(muted))
+                            .child(Label::new(path).text_xs()),
+                    )
+                    .on_change(cx.listener(move |this, checked, _, cx| {
+                        if frozen {
+                            return;
+                        }
+                        if let Some(row) = this.changes.get_mut(index) {
+                            row.selected = *checked;
+                        }
+                        cx.notify();
+                    }))
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .child(header)
+            .child(hint)
+            .child(rows)
+            .into_any_element()
     }
 
     fn controls(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -393,6 +661,7 @@ impl Render for PublishView {
         };
         let notice = self.notice.clone();
         let controls = self.controls(cx);
+        let changes = self.changes_panel(cx);
 
         // These two only read `self` through `&Context`, so they must come after
         // `controls`, which needs `&mut`.
@@ -418,6 +687,7 @@ impl Render for PublishView {
                     .text_xs()
                     .text_color(if has_errors { danger } else { muted }),
             )
+            .child(changes)
             .child(Label::new(notice).text_xs().text_color(muted))
             .child(
                 div()

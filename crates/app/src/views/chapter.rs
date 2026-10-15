@@ -52,6 +52,9 @@ enum Lookup {
 
 pub struct ChapterWizard {
     config: Config,
+    /// Files this session wrote, so a publish commits the chapter that was just
+    /// created rather than whatever else the checkout contains.
+    session: crate::state::SessionFiles,
     books: Vec<BookChoice>,
     /// Index into `books`, or `None` before the first selection.
     selected: Option<usize>,
@@ -68,7 +71,12 @@ pub struct ChapterWizard {
 }
 
 impl ChapterWizard {
-    pub fn new(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: Config,
+        session: crate::state::SessionFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let problem = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("题号，例如 P1001", window, cx);
@@ -88,6 +96,7 @@ impl ChapterWizard {
         let wizard = Self {
             books: load_books(&config),
             config,
+            session,
             selected: None,
             section_index: None,
             problem,
@@ -233,13 +242,26 @@ impl ChapterWizard {
         let book_ref = choice.book.as_book_ref();
         let input = self.input(cx);
         let blog = self.config.blog();
+        let repo = self.config.repo();
+
+        // Read the chapter template on the UI thread, before anything is
+        // written: a configured template that cannot be read is a mistake worth
+        // reporting, not a reason to quietly fall back to the built-in skeleton.
+        let template = match self.config.chapter_template_text(&repo) {
+            Ok(template) => template,
+            Err(message) => {
+                self.stage = Stage::Failed(message);
+                cx.notify();
+                return;
+            }
+        };
 
         self.stage = Stage::Creating;
         cx.notify();
 
         let (tx, rx) = mpsc::channel::<Result<ChapterOutcome, String>>();
         let result = cx.background_executor().spawn(async move {
-            let outcome = chapters::create_chapter(&blog, &book_ref, &input)
+            let outcome = chapters::create_chapter(&blog, &book_ref, &input, template.as_deref())
                 .map_err(|err| err.to_string());
             let _ = tx.send(outcome);
         });
@@ -250,6 +272,10 @@ impl ChapterWizard {
             this.update(cx, |this, cx| {
                 this.stage = match outcome {
                     Some(Ok(outcome)) => {
+                        // Two files changed: the chapter itself and the outline
+                        // line that now links it.
+                        this.session.record(&repo, &outcome.chapter_path);
+                        this.session.record(&repo, &outcome.outline_path);
                         this.preview = None;
                         Stage::Created(Box::new(outcome))
                     }

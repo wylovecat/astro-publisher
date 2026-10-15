@@ -46,6 +46,19 @@ pub enum OutlineError {
     },
     #[error("line {line} is not an outline entry, so it cannot be edited")]
     NotAnEntry { line: usize },
+    #[error("no entry for problem `{problem_id}` in {file}{section}")]
+    NoSuchEntry {
+        problem_id: String,
+        file: String,
+        section: String,
+    },
+    #[error("problem `{problem_id}` appears {count} times in {file}{section}; pass a section to say which one")]
+    AmbiguousEntry {
+        problem_id: String,
+        file: String,
+        section: String,
+        count: usize,
+    },
     #[error("problem {problem_id} was not found in section {section}")]
     ProblemNotFound { problem_id: String, section: String },
     #[error("section `{0}` was not found in {1}")]
@@ -442,6 +455,233 @@ pub fn render_entry(entry: &OutlineEntry) -> String {
     parts.join(" ")
 }
 
+// --- Edits ------------------------------------------------------------------
+//
+// `create_chapter` is not the only thing that changes an outline: a chapter can
+// be written outside this tool (or before it existed), and a video may be
+// published long after its 题解. These operations exist for those cases, and for
+// the headless and AI front ends that have no outline screen to click through.
+//
+// They address an entry the way a human does — book, section, problem id —
+// rather than by line number, because the same problem id appears in several
+// sections (plan §1.2) and a line number is only meaningful to a process that
+// has just parsed the file.
+
+/// Which marker an edit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKind {
+    Solution,
+    Video,
+}
+
+impl MarkerKind {
+    /// The label the marker is rendered with.
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerKind::Solution => "题解",
+            MarkerKind::Video => "视频",
+        }
+    }
+
+    fn apply(&self, entry: &mut OutlineEntry, marker: Marker) {
+        match self {
+            MarkerKind::Solution => entry.solution = marker,
+            MarkerKind::Video => entry.video = marker,
+        }
+    }
+
+    fn get<'a>(&self, entry: &'a OutlineEntry) -> &'a Marker {
+        match self {
+            MarkerKind::Solution => &entry.solution,
+            MarkerKind::Video => &entry.video,
+        }
+    }
+}
+
+/// One entry located for editing, with the section it sits in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedEntry {
+    pub line: usize,
+    pub section: String,
+    pub entry: OutlineEntry,
+}
+
+/// What a single-line edit changed, for reporting and for showing a diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineEdit {
+    pub path: PathBuf,
+    pub line: usize,
+    pub section: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// Find the entries for `problem_id`, optionally restricted to one section.
+///
+/// Case-insensitive, because problem ids are typed by hand.
+pub fn locate(
+    outline: &Outline,
+    problem_id: &str,
+    section: Option<&str>,
+) -> Vec<LocatedEntry> {
+    let wanted = problem_id.trim().to_lowercase();
+    let section_filter = section.map(|s| s.trim().to_lowercase());
+
+    outline
+        .sections
+        .iter()
+        .filter(|s| match &section_filter {
+            Some(name) => s.text.trim().to_lowercase() == *name,
+            None => true,
+        })
+        .flat_map(|s| {
+            let heading = s.text.clone();
+            // Cloned per section: the closure is `move`, and one `wanted` per
+            // section would borrow it into the first iteration only.
+            let wanted = wanted.clone();
+            s.entries.iter().filter_map(move |entry| {
+                let matches_problem = entry
+                    .problem_id
+                    .as_deref()
+                    .map(|id| id.to_lowercase() == wanted)
+                    .unwrap_or(false);
+                matches_problem.then(|| LocatedEntry {
+                    line: entry.line,
+                    section: heading.clone(),
+                    entry: entry.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Locate exactly one entry, refusing to guess when the id is ambiguous.
+///
+/// A repeated problem id is not a corner case here — the plan records P5709
+/// appearing under two sections — so "which one" is a question with a real
+/// answer, and silently editing the first would corrupt the other.
+pub fn locate_one(
+    outline: &Outline,
+    problem_id: &str,
+    section: Option<&str>,
+) -> Result<LocatedEntry, OutlineError> {
+    let file = outline.path.display().to_string();
+    let found = locate(outline, problem_id, section);
+    let qualifier = match section {
+        Some(name) => format!(" of section `{name}`"),
+        None => String::new(),
+    };
+    match found.len() {
+        0 => Err(OutlineError::NoSuchEntry {
+            problem_id: problem_id.to_owned(),
+            file,
+            section: qualifier,
+        }),
+        1 => Ok(found.into_iter().next().expect("length checked")),
+        count => Err(OutlineError::AmbiguousEntry {
+            problem_id: problem_id.to_owned(),
+            file,
+            section: qualifier,
+            count,
+        }),
+    }
+}
+
+/// Point a 📖/📺 marker at `href`.
+pub fn set_link(
+    path: &Path,
+    problem_id: &str,
+    section: Option<&str>,
+    kind: MarkerKind,
+    href: &str,
+) -> Result<LineEdit, OutlineError> {
+    edit(path, problem_id, section, |entry| {
+        kind.apply(
+            entry,
+            Marker::Linked {
+                label: kind.label().to_owned(),
+                href: href.trim().to_owned(),
+            },
+        );
+    })
+}
+
+/// Put a 📖/📺 marker back to its placeholder (`📖题解` / `📺视频`).
+pub fn clear_link(
+    path: &Path,
+    problem_id: &str,
+    section: Option<&str>,
+    kind: MarkerKind,
+) -> Result<LineEdit, OutlineError> {
+    edit(path, problem_id, section, |entry| {
+        kind.apply(entry, Marker::Placeholder);
+    })
+}
+
+/// Tick or untick an entry's checkbox.
+///
+/// Deliberately separate from [`set_link`]: what the checkbox *means* differs
+/// per book (基础篇 tracks 题解, 进阶篇 tracks 视频 — plan §1.2), so this tool does
+/// not guess. [`crate::chapters::create_chapter`] is where that knowledge lives,
+/// because it knows which book it is creating for.
+pub fn set_checked(
+    path: &Path,
+    problem_id: &str,
+    section: Option<&str>,
+    checked: bool,
+) -> Result<LineEdit, OutlineError> {
+    edit(path, problem_id, section, |entry| {
+        entry.checked = checked;
+    })
+}
+
+/// Read, edit one entry, write back, and report the exact change.
+fn edit(
+    path: &Path,
+    problem_id: &str,
+    section: Option<&str>,
+    mutate: impl FnOnce(&mut OutlineEntry),
+) -> Result<LineEdit, OutlineError> {
+    let mut outline = Outline::read(path)?;
+    let located = locate_one(&outline, problem_id, section)?;
+    let before = located.entry.raw.clone();
+
+    let mut updated = located.entry.clone();
+    mutate(&mut updated);
+    // `raw` documented itself as the line as it stands, so a caller that
+    // re-renders this entry gets the edited line rather than the pre-edit one.
+    updated.raw = render_entry(&updated);
+    outline.replace_entry(located.line, &updated)?;
+
+    // Re-parse before committing: a rewrite that no longer parses is a rewrite
+    // this tool should not make silently.
+    let reparsed = Outline::parse(&outline.render(), path);
+    if !reparsed.lines.get(located.line).map(|line| {
+        parse_entry(line, located.line).is_some_and(|parsed| {
+            parsed.checked == updated.checked
+                && parsed.solution == updated.solution
+                && parsed.video == updated.video
+        })
+    }) .unwrap_or(false) {
+        return Err(OutlineError::SelfCheckFailed);
+    }
+
+    outline.write()?;
+
+    Ok(LineEdit {
+        path: path.to_path_buf(),
+        line: located.line,
+        section: located.section,
+        before,
+        after: outline.lines[located.line].clone(),
+    })
+}
+
+/// The marker a line currently carries, for a status report.
+pub fn marker_of(entry: &OutlineEntry, kind: MarkerKind) -> &Marker {
+    kind.get(entry)
+}
+
 fn parse_entry(line: &str, index: usize) -> Option<OutlineEntry> {
     let caps = entry_re().captures(line)?;
     let rest = caps.name("rest").map(|m| m.as_str()).unwrap_or("");
@@ -516,5 +756,131 @@ fn strip_problem_id_prefix(label: &str, problem_id: &str) -> String {
     match trimmed.strip_prefix(problem_id) {
         Some(rest) => rest.trim_start().to_owned(),
         None => trimmed.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    /// A miniature outline with the two irregularities that matter: `*` as a
+    /// list marker, and one problem id appearing under two sections.
+    const SAMPLE: &str = "# Part1 入门\n\
+        ## 1. 第一节\n\
+        - [x] [P1001 A+B Problem](https://www.luogu.com.cn/problem/P1001) 📖[题解](/posts/lgj/_0x0001) 📺视频\n\
+        * [ ] [P5709 圆的面积](https://www.luogu.com.cn/problem/P5709) 📖题解 📺视频\n\
+        \n\
+        ## 2. 第二节\n\
+        - [ ] [P5709 圆的面积](https://www.luogu.com.cn/problem/P5709) 📖题解 📺视频   \n";
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("an-outline-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("lg-index.md");
+        std::fs::write(&path, SAMPLE).expect("write the outline");
+        path
+    }
+
+    #[test]
+    fn linking_a_solution_touches_one_line_and_keeps_the_rest() {
+        let path = scratch("link-solution");
+        let before = std::fs::read_to_string(&path).expect("read");
+
+        let edit = set_link(
+            &path,
+            "P5709",
+            Some("1. 第一节"),
+            MarkerKind::Solution,
+            "/posts/lgj/_0x0009",
+        )
+        .expect("links");
+
+        assert_eq!(edit.line, 3, "the P5709 line of section 1");
+        assert!(edit.after.contains("📖[题解](/posts/lgj/_0x0009)"));
+        assert!(edit.after.contains("📺视频"), "the video marker survives");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        let changed: Vec<usize> = before
+            .lines()
+            .zip(after.lines())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(changed, vec![3], "exactly the targeted line changed");
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn a_repeated_problem_id_must_be_disambiguated() {
+        let path = scratch("ambiguous");
+        let err = set_link(
+            &path,
+            "p5709",
+            None,
+            MarkerKind::Video,
+            "https://example.invalid/v",
+        )
+        .expect_err("refuses to guess");
+
+        assert!(
+            matches!(err, OutlineError::AmbiguousEntry { count: 2, .. }),
+            "expected an ambiguity error, got {err}"
+        );
+        assert!(err.to_string().contains("pass a section"));
+
+        // Naming the section resolves it, and case does not matter either way.
+        let edit = set_link(
+            &path,
+            "p5709",
+            Some("2. 第二节"),
+            MarkerKind::Video,
+            "https://example.invalid/v",
+        )
+        .expect("links");
+        assert_eq!(edit.section, "2. 第二节");
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn clearing_a_link_restores_the_placeholder() {
+        let path = scratch("clear");
+        let edit = clear_link(&path, "P1001", None, MarkerKind::Solution).expect("clears");
+        assert!(edit.after.contains("📖题解"));
+        assert!(!edit.after.contains("/posts/lgj/_0x0001"));
+        assert_eq!(edit.before.split("📖").nth(1).map(str::trim), Some("[题解](/posts/lgj/_0x0001) 📺视频"));
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn the_checkbox_is_independent_of_the_link() {
+        let path = scratch("check");
+        let edit = set_checked(&path, "P1001", None, false).expect("unticks");
+        assert!(edit.after.starts_with("- [ ]"), "got {}", edit.after);
+        assert!(
+            edit.after.contains("📖[题解](/posts/lgj/_0x0001)"),
+            "ticking is not link management"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn an_unknown_problem_is_reported_rather_than_edited() {
+        let path = scratch("missing");
+        let err = set_checked(&path, "P9999", None, true).expect_err("no such entry");
+        assert!(matches!(err, OutlineError::NoSuchEntry { .. }));
+        // The file must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            SAMPLE,
+            "a failed lookup must not rewrite the outline"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
     }
 }

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=astro-publisher
+GenericName=Blog publisher
+Comment=Write and publish posts for an Astro blog
+Exec=@LAUNCHER@ %u
+Icon=astro-publisher
+Terminal=false
+Categories=Utility;Development;TextEditor;
+MimeType=text/markdown;
+StartupWMClass=astro-publisher
+X-AppVersion=@VERSION@

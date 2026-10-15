@@ -71,6 +71,9 @@ impl EventEmitter<OutlineEvent> for OutlineView {}
 
 pub struct OutlineView {
     config: Config,
+    /// Files this session wrote, so a publish commits the chapter that was just
+    /// created rather than whatever else the checkout contains.
+    session: crate::state::SessionFiles,
     books: Vec<BookProgress>,
     /// Book id to its most recent outcome.
     notices: HashMap<String, Notice>,
@@ -85,9 +88,15 @@ pub struct OutlineView {
 }
 
 impl OutlineView {
-    pub fn new(config: Config, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: Config,
+        session: crate::state::SessionFiles,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Self {
         let mut view = Self {
             config,
+            session,
             books: Vec::new(),
             notices: HashMap::new(),
             busy: HashSet::new(),
@@ -171,6 +180,18 @@ impl OutlineView {
         let blog = self.config.blog();
         let author = self.config.author.clone();
         let check = self.check_implies_solution;
+        let repo = self.config.repo();
+
+        // Read the chapter template before anything is written: an unreadable
+        // configured template is reported instead of silently falling back.
+        let template = match self.config.chapter_template_text(&repo) {
+            Ok(template) => template,
+            Err(message) => {
+                self.failed.insert(key.clone(), message);
+                cx.notify();
+                return;
+            }
+        };
 
         self.busy.insert(key.clone());
         self.failed.remove(&key);
@@ -178,9 +199,15 @@ impl OutlineView {
 
         let (tx, rx) = mpsc::channel::<Result<ChapterOutcome, String>>();
         let work = cx.background_executor().spawn(async move {
-            let outcome =
-                chapters::create_chapter_from_entry(&blog, &book_ref, &entry, &author, check)
-                    .map_err(|err| err.to_string());
+            let outcome = chapters::create_chapter_from_entry(
+                &blog,
+                &book_ref,
+                &entry,
+                &author,
+                check,
+                template.as_deref(),
+            )
+            .map_err(|err| err.to_string());
             let _ = tx.send(outcome);
         });
 
@@ -192,6 +219,9 @@ impl OutlineView {
                 this.busy.remove(&key);
                 match outcome {
                     Some(Ok(outcome)) => {
+                        // Two files changed: the chapter and the outline line.
+                        this.session.record(&repo, &outcome.chapter_path);
+                        this.session.record(&repo, &outcome.outline_path);
                         this.notices.insert(
                             key.0.clone(),
                             Notice {

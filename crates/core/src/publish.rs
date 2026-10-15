@@ -8,6 +8,11 @@
 //! The sequence is: validate → local build → commit → push → hosting deploy.
 //! Validation errors block; warnings do not. A push failure never triggers an
 //! automatic rebase or force push — the pipeline reports it and stops.
+//!
+//! What gets committed is *not* "whatever the working tree happens to contain".
+//! [`PublishOptions::stage_paths`] carries an explicit list, and only those
+//! paths are staged (plan §5, step 3): the repo is the blog's own checkout, and
+//! a stray `git add -A` would sweep up whatever else was lying around in it.
 
 use crate::process::{self, OutputLine, ProcessError, Stream};
 use crate::validate::{self, Finding};
@@ -94,6 +99,13 @@ pub struct PublishOptions {
     pub git_remote: String,
     /// Fallback branch when the checked-out branch cannot be resolved.
     pub git_branch: String,
+    /// Repository-relative paths to stage, in the order shown to the user.
+    ///
+    /// `Some(list)` stages exactly that list; an empty list is an error rather
+    /// than "stage everything", because the way to say "stage everything" is to
+    /// say it. `None` stages the whole tree (`git add -A`) and is what the CLI
+    /// does without `--stage`, which has no session to draw a list from.
+    pub stage_paths: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +114,8 @@ pub enum PublishError {
     Validation { findings: Vec<Finding> },
     #[error("没有需要提交的改动")]
     NothingToCommit,
+    #[error("没有选中要提交的文件")]
+    NothingSelected,
     #[error("构建失败")]
     Build { tail: String },
     #[error("提交失败：{0}")]
@@ -114,6 +128,66 @@ pub enum PublishError {
     UnknownBranch,
     #[error(transparent)]
     Process(#[from] ProcessError),
+}
+
+/// One entry of `git status --porcelain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusChange {
+    /// The two-column XY status code, e.g. `M `, `??`, `A `.
+    pub code: String,
+    /// Repository-relative path, with forward slashes, unquoted.
+    pub path: String,
+}
+
+/// The working-tree changes a publish would have to deal with.
+pub async fn pending_changes(repo: &Path) -> Result<Vec<StatusChange>, ProcessError> {
+    let output = git_status(repo).await?;
+    Ok(parse_status_porcelain(&output.stdout_text()))
+}
+
+/// `git status --porcelain` with `core.quotePath` off.
+///
+/// Without that setting git escapes every non-ASCII path into octal (`"\346\226\207.md"`),
+/// which is useless in a UI whose whole point is showing the user which files
+/// they are about to commit.
+async fn git_status(repo: &Path) -> Result<process::CommandOutput, ProcessError> {
+    process::run_collect(
+        "git",
+        &["-c", "core.quotePath=false", "status", "--porcelain"],
+        repo,
+    )
+    .await
+}
+
+/// Parse `git status --porcelain` output.
+///
+/// Two shapes have to survive: the fixed `XY path` prefix, and the rename form
+/// `XY old -> new`, where the path that will exist after the commit is the one
+/// after the arrow. A renamed pair means the old path is going away and the new
+/// one is arriving, and staging the new one is what stages the rename.
+pub fn parse_status_porcelain(text: &str) -> Vec<StatusChange> {
+    text.lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let code = line[..2].trim().to_owned();
+            let rest = line[3..].trim();
+            if code.is_empty() {
+                return None;
+            }
+            let path = match rest.split_once(" -> ") {
+                Some((_, new_path)) => new_path,
+                None => rest,
+            };
+            let path = path.trim_matches('"').to_owned();
+            if path.is_empty() {
+                None
+            } else {
+                Some(StatusChange { code, path })
+            }
+        })
+        .collect()
 }
 
 /// Run the pipeline, reporting progress through `emit`.
@@ -222,8 +296,9 @@ where
 
     // --- 3. Commit ------------------------------------------------------------
     step(emit, 2, StepState::Running, "git status".to_owned());
-    let status = process::run_collect("git", &["status", "--porcelain"], &repo).await?;
-    if status.stdout_text().trim().is_empty() {
+    let status = git_status(&repo).await?;
+    let changes = parse_status_porcelain(&status.stdout_text());
+    if changes.is_empty() {
         step(emit, 2, StepState::Failed, "工作区干净".to_owned());
         return Err(PublishError::NothingToCommit);
     }
@@ -231,8 +306,56 @@ where
         return Err(PublishError::Cancelled);
     }
 
-    step(emit, 2, StepState::Running, "git add -A".to_owned());
-    process::run_collect("git", &["add", "-A"], &repo).await?;
+    match &options.stage_paths {
+        // No list to work from: stage the whole tree. This is the CLI's
+        // behaviour, and it says so in the log — a silent `git add -A` from a
+        // GUI is how unrelated files end up in a content commit.
+        None => {
+            step(emit, 2, StepState::Running, "git add -A（全部改动）".to_owned());
+            process::run_collect("git", &["add", "-A"], &repo).await?;
+        }
+        Some(paths) => {
+            if paths.is_empty() {
+                step(
+                    emit,
+                    2,
+                    StepState::Failed,
+                    "一个文件都没选中".to_owned(),
+                );
+                return Err(PublishError::NothingSelected);
+            }
+            step(
+                emit,
+                2,
+                StepState::Running,
+                format!("git add（{} 个文件）", paths.len()),
+            );
+            for path in paths {
+                emit(PublishEvent::Log(OutputLine {
+                    stream: Stream::Stdout,
+                    text: format!("[暂存] {}", path.display()),
+                }));
+            }
+            // `-A` so a deleted file the user picked is staged as a deletion,
+            // and `--` so a path like `-weird.md` is not read as an option.
+            let mut args: Vec<String> = vec!["add".to_owned(), "-A".to_owned(), "--".to_owned()];
+            args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
+            let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+            process::run_collect("git", &borrowed, &repo).await?;
+
+            // Staging is not the same as choosing: an index left over from an
+            // earlier `git add` in a terminal is still staged, and `commit`
+            // takes all of it. Say so rather than let it ride silently.
+            for path in staged_beyond(&repo, paths).await? {
+                emit(PublishEvent::Log(OutputLine {
+                    stream: Stream::Stderr,
+                    text: format!(
+                        "[警告] {path} 不在所选清单里，但它此前已被暂存，本次提交会带上它"
+                    ),
+                }));
+            }
+        }
+    }
 
     step(
         emit,
@@ -301,6 +424,44 @@ where
     };
     emit(PublishEvent::Finished(summary.clone()));
     Ok(summary)
+}
+
+/// Staged paths that were not in the selection.
+///
+/// Leftovers matter: `git commit` takes whatever is in the index, so a file
+/// staged by an earlier `git add` — in a terminal, or by a previous run of this
+/// tool — joins the commit no matter what the current run selected.
+async fn staged_beyond(repo: &Path, selected: &[PathBuf]) -> Result<Vec<String>, ProcessError> {
+    let output = process::run_collect(
+        "git",
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--cached",
+            "--name-only",
+        ],
+        repo,
+    )
+    .await?;
+
+    let allowed: std::collections::HashSet<String> =
+        selected.iter().map(|path| normalise(path)).collect();
+
+    Ok(output
+        .stdout_text()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !allowed.contains(&normalise(Path::new(line))))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Repo-relative, forward-slashed form, which is what git reports and what the
+/// selection list holds.
+fn normalise(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn step(
@@ -372,4 +533,48 @@ async fn current_branch(repo: &Path) -> Result<String, ProcessError> {
         });
     }
     Ok(branch)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verbatim shapes of `git status --porcelain` (with `core.quotePath=false`
+    /// so the Chinese path stays readable, which is the whole reason for the
+    /// `-c` flag the pipeline passes).
+    const SAMPLE: &str = " M src/data/blog/lgj/lg-B2620.md\n?? src/data/blog/solu/新文章.md\nA  src/data/blog/lgs/lg-P1234.md\n";
+
+    #[test]
+    fn reads_code_and_path_from_every_status_shape() {
+        let changes = parse_status_porcelain(SAMPLE);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].code, "M");
+        assert_eq!(changes[0].path, "src/data/blog/lgj/lg-B2620.md");
+        assert_eq!(changes[1].code, "??");
+        // Non-ASCII survives instead of arriving as octal escapes.
+        assert_eq!(changes[1].path, "src/data/blog/solu/新文章.md");
+        assert_eq!(changes[2].code, "A");
+    }
+
+    #[test]
+    fn a_rename_is_reported_under_the_path_it_moves_to() {
+        // `R  old -> new`: staging `new` is what stages the rename, and `old`
+        // does not exist afterwards, so the arrow's right side is the path that
+        // belongs in the selection.
+        let changes = parse_status_porcelain("R  src/data/blog/old.md -> src/data/blog/new.md\n");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].code, "R");
+        assert_eq!(changes[0].path, "src/data/blog/new.md");
+    }
+
+    #[test]
+    fn a_clean_tree_parses_to_nothing() {
+        assert!(parse_status_porcelain("").is_empty());
+        assert!(parse_status_porcelain("   \n\n").is_empty());
+    }
+
+    #[test]
+    fn windows_separators_normalise_to_the_form_git_prints() {
+        let raw = PathBuf::from(r"src\data\blog\lgj\lg-B2620.md");
+        assert_eq!(normalise(&raw), "src/data/blog/lgj/lg-B2620.md");
+    }
 }

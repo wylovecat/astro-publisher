@@ -39,14 +39,21 @@
 │   │   ├── src/config.rs         #   配置读写与仓库根目录探测（CLI / GUI / MCP 共用）
 │   │   ├── src/publish.rs        #   校验 → 构建 → 提交 → 推送（CLI 与 GUI 共用，事件流式上报）
 │   │   ├── src/process.rs        #   子进程（pnpm / git），UTF-8 流式输出
+│   │   ├── src/job.rs            #   Windows job object：强杀应用时内核连带杀掉子进程树
 │   │   └── src/bin/cli.rs        #   无头 CLI
 │   ├── app/                      # GPUI 桌面应用（侧边栏 + 列表 + 编辑器 + 章节向导 + 发布 + 设置）
+│   │   ├── src/single_instance.rs  #   跨平台实例锁 + 「已在运行」提示
 │   │   └── src/views/
 │   └── mcp/                      # MCP server（stdio），把 core 的能力暴露给 AI 助手
 │       └── src/main.rs
 ├── packaging/
 │   ├── build-installer.ps1        # 打包脚本：版本从 Cargo.toml 读，可选签名
-│   └── installer.nsi              # NSIS 脚本（必须是带 BOM 的 UTF-8）
+│   ├── installer.nsi              # NSIS 脚本（必须是带 BOM 的 UTF-8）
+│   └── linux/                     # Linux 分发：tar.gz + shell 安装器
+│       ├── build-tarball.sh       #   编译并组装 tarball（必须在目标机上跑）
+│       ├── install.sh             #   安装 / 卸载到 ~/.local 或 --prefix / --system
+│       ├── astro-publisher.desktop.in  # 桌面项模板（@LAUNCHER@ / @VERSION@）
+│       └── astro-publisher.svg    #   应用图标
 └── tests/fixtures/               # 合成测试内容（不含任何真实博客数据）
 ```
 
@@ -54,7 +61,7 @@
 
 ```bash
 cargo build --release        # 首次编译较久（GPUI + tree-sitter），之后增量很快
-cargo test                   # 40 个测试，全部基于合成 fixture
+cargo test                   # 114 个测试，全部基于合成 fixture（1 个联网测试标了 ignored）
 
 # 桌面应用
 cargo run -p astro-publisher
@@ -86,10 +93,18 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 | `posts` | 列出文章（`--drafts` 含草稿） |
 | `new-post` | 新建普通文章：`--title --group <dir> --file-name <name> [--tag t]... [--draft]` |
 | `new-chapter` | **新建课程章节**：`--book <id> --section "<小节>" --problem <P1001> --title <题目名> [--video <url>]` |
+| `link-solution` | 给大纲里某一行补题解链接：`--book <id> --problem <P1001> --post <group/name>` |
+| `link-video` | 给大纲里某一行补视频链接：`--book <id> --problem <P1001> --url <url>` |
+| `unlink` | 撤掉链接：`--book <id> --problem <P1001> --clear solution\|video\|both` |
+| `set-check` | 切换大纲行的 `[ ]` / `[x]`：`--book <id> --problem <P1001> --on \| --off` |
 | `preview` | 渲染 Markdown 预览（`--file` 或 `--text`），公式走真 KaTeX |
-| `publish` | 校验 → `pnpm build` → `git commit` → `git push`（`--dry-run` 演练，`--no-build` 跳过构建） |
+| `publish` | 校验 → `pnpm build` → `git commit` → `git push`（`--dry-run` 演练，`--no-build` 跳过构建，`--stage <path>` 只暂存指定路径） |
 
 `new-chapter` 是核心操作：它分配全站 `_0xNNNN` 序列 slug、生成章节文件、并把大纲对应行更新成 `📖[题解](/posts/<group>/<slug>)`。整个过程是原子的——任一步失败都会删掉已建文件、还原大纲。
+
+`link-solution` / `link-video` / `unlink` / `set-check` 是同一套写操作的命令行入口，用于「章节已经在别处写好了，只想回填大纲」的场景（例如批量从洛谷题单补链接）。它们的定位规则一致：**按「书 + 题号」在大纲里找行**。题号在大纲里出现多次时不会猜——直接报 `AmbiguousEntry` 并列出候选行，让你用 `--section "<小节>"` 缩小范围。定位不到报 `NoSuchEntry`。写回只动目标那一行，相邻行的缩进、列表符风格、原始字节都不动；失败时文件保持原样。
+
+`unlink` 用 `--clear` 而不是 `--video` 之类的布尔开关，是为了不和 `new-chapter --video <url>` 的既有语义撞车。
 
 ## 应用内操作
 
@@ -97,10 +112,41 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 - **编辑文章**：源码 + 实时预览并排。预览走 gpui-component 的 Markdown 引擎：代码块按代码块画（等宽、缩进保留、背景与右上角语言标签），行内代码带底色。编辑器里 **Ctrl+V 粘贴截图**会写入仓库 `public/images/`，并在光标处插入 `![](/images/<文章名>-<时间戳>.png)`；写入失败会报原因而不是把二进制当文本贴进去。非图片的剪贴板内容照旧走普通文本粘贴。
 - **预览里的公式**：`$…$` 与 `$$…$$` 由 KaTeX 本体排版（与站点 rehype-katex 同一套引擎），再由 `core/src/math_dom.rs` 把 KaTeX 的排版结构读回成公式树、`app/src/views/preview_math.rs` 用 GPUI 原生画出——GPUI 没有 CSS 引擎，直接喂 HTML 只会显示 MathML 源码。分式、上下标、根号、`\sum` 的上下限、`\boxed`、`array`/`cases` 都按 KaTeX 的结构还原；KaTeX 自带 SVG 的字形（`\vec` 的箭头、可伸缩括号）退回 Unicode 近似。KaTeX 自己排不出的公式（例如 duktape 后端下的 `pmatrix`）退回显示源码，预览不会少内容。
 - **发布**：填提交信息 → 「发布」跑完整流水线，「演练」只校验与构建不提交，「停止」会在下一个安全点中止（正在构建时会结束构建进程）。左侧是五个步骤的实时状态，右侧是校验、构建与 git 的逐行输出。推送失败只提示手动处理，不做自动 rebase 或强推。
+- **待提交清单**：发布面板里有一份 `git status` 的勾选清单，**只有勾中的文件会被暂存**。默认勾选的正是本次会话在工具里改过的那些（保存过的文章、粘贴的图片、创建的章节与更新过的大纲），其余改动要你手动勾。这是为了不让「一键发布」顺手把仓库里无关的改动一起提交——博客检出目录里常年放着别的活儿。
+- **关窗前会问**：编辑器里有未保存的修改时，关闭窗口会被拦下来并弹出确认。破坏性的「放弃并退出」是默认按钮，「返回编辑器」留着；要保留就先返回、按 `Ctrl+S` 再关。
+- **单实例**：同一台机器上只允许一个实例。第二个实例会弹窗告诉你已有实例的进程号然后退出（release 版没有控制台，所以用原生消息框）。上一次进程被强杀留下的锁会被自动接管，不会把用户锁在自己工具外面。
 
 发布流水线实现在 `core/src/publish.rs`，CLI 的 `publish` 与应用里的按钮共用同一份，行为一致。
 
 「抓取」走 `core/src/problem.rs`：一次 GET 题目页，解析页面内嵌的 `lentille-context` JSON 得到题目名、难度与标签。结果是纯函数解析，网络调用可注入，所以测试不需要联网（唯一联网的测试标了 `#[ignore]`，用 `cargo test -p astro-publisher-core -- --ignored live_lookup` 手动跑）。抓取结果按题号缓存在平台缓存目录，同一题第二次查不再联网；抓取失败只提示原因，题目名照旧手填，不影响创建。
+
+## 章节正文模板
+
+新建章节时正文用什么骨架，默认是内置的一套固定结构。要换成自己的，在配置里指一个**模板文件路径**：
+
+```toml
+chapter_template = "../my-blog/templates/chapter.md"   # 相对路径按博客仓库根目录解析
+```
+
+绝对路径也行。占位符：
+
+| 占位符 | 内容 |
+| --- | --- |
+| `{{problem_id}}` | 题号，如 `B2601` |
+| `{{title}}` | 题目名 |
+| `{{slug}}` | 分配到的 `_0xNNNN` |
+| `{{counter}}` | `_0xNNNN` 的数字部分 |
+| `{{book_title}}` | 书名 |
+| `{{author}}` | 站点作者（取自博客配置） |
+| `{{date}}` | 今天，`YYYY-MM-DD` |
+
+三条刻意的规则：
+
+- **占位符写错不会静默出错**：未知的 `{{...}}` 原样保留在正文里，没闭合的 `{{` 当普通文字处理。所以模板里写错变量名，你会在生成的文件里直接看到，不会得到一篇悄悄少了一段的题解。
+- **模板读不到就报错，不静默回退到内置骨架**。回退的后果是「我明明配了模板，生成的章节还是老样子」——比直接失败难查得多。路径失效时命令会告诉你它读的是哪个路径。
+- **环境变量 `ASTRO_PUBLISHER_CHAPTER_TEMPLATE` 可以覆盖配置**，且优先于配置（也在仓库根目录早退之前生效，所以 `--repo` 没给也能用）。临时换模板、CI 里跑一次、给某个客户演示，都不用改文件。
+
+GUI 的章节向导、大纲视图、CLI、MCP 四个入口都走同一个 `create_chapter`，模板因此在四个地方行为一致。
 
 ## 发布链路
 
@@ -112,7 +158,7 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 
 约定：**推送即发布**。本地构建用来在推送前拦下 frontmatter 错误（`astro check`）；推送失败时不做自动 rebase、不强推，只提示手动处理。
 
-> 注意：本工具不会替你决定「提交哪些文件」。CLI 的 `publish` 使用 `git add -A`，请先用 `--dry-run` 确认待提交内容。
+> 暂存哪些文件由你决定：桌面端在发布面板上列出 `git status` 的勾选清单（默认只勾本次会话改过的），CLI 默认仍是 `git add -A`，除非用 `--stage <path>` 指定路径（可重复）。无论哪种方式，先用 `--dry-run` 确认待提交内容。
 
 ## 内容约定
 
@@ -125,7 +171,7 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
   - 题号从题目链接的 URL 里提取，不做括号配对（标题可能含全角括号）。
   - `[x]` 勾选的含义可按书配置：演示用的基础篇中「勾选 ⇔ 题解已写」，由工具同步维护；进阶篇用视频标记进度，工具不改其勾选语义。
 - **`_0xNNNN` slug 是全站统一序列**，下一个 = 全站最大 + 1。
-- 同一题号在大纲中可出现多次，写操作按「行号 + 小节」定位，不做全局替换。
+- 同一题号在大纲中可出现多次。写操作按「书 + 小节 + 题号」定位到**具体一行**，不做全局替换；题号有歧义时报错并列出候选，要求你指定小节。
 - **粘贴的图片落在 `public/images/`**，文件名是 `<文章名>-<YYYYMMDD-HHMMSS>.<ext>`，正文里用绝对路径 `/images/<文件名>` 引用（`public/` 下的东西站点按根路径提供）。只接受站点能直接服务的扩展名（png/jpg/jpeg/webp/gif/svg/bmp/tiff/ico）。
 - 书籍登记在 `src/data/books.json`（见下），每条至少要有 `id`、`title`、`description`、`indexId`（指向大纲文章）。
 
@@ -146,7 +192,8 @@ cargo build -p astro-publisher-mcp
 | 类型 | 工具 |
 | --- | --- |
 | 只读 | `list_posts`、`read_post`、`list_books`、`list_sections`、`lookup_problem`、`validate`、`preview_chapter` |
-| 写 | `create_chapter`（建章节文件 + 改大纲，失败整体回滚） |
+| 写 | `create_chapter`（建章节文件 + 改大纲，失败整体回滚）、`create_post`（新建普通文章） |
+| 维护大纲 | `link_solution`、`link_video`、`set_check`（题号歧义时报错并列出候选，要求指定小节；不猜） |
 | 有副作用 | `publish`（**默认演练**：不显式设 `dry_run: false` 就不会 commit / push） |
 
 两条刻意的设计：
@@ -181,8 +228,12 @@ cargo build -p astro-publisher-mcp
 - **图标资源必须显式注册**：`gpui_component::init(cx)` **不注册**图标资源（最小化/最大化/关闭等窗口按钮、按钮图标全部静默渲染成空白，不报错）。图标在独立 crate `gpui-kit-assets`，启动时须 `application().with_assets(gpui_kit_assets::Assets).run(...)`。忘记这一步时窗口右上角三个按钮完全消失，症状是「按钮不显示」而不是崩溃。
 - **桌面程序不要留控制台**：`crates/app/src/main.rs` 顶部用 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`，所以 **release 版进程没有控制台**（启动时不再出现黑色窗口），代价是 release 下的 `println!`/panic 都看不见——排查问题用 debug 版（`cargo run`，仍带控制台）。
 - **连带规则：spawn 子进程必须过 `process::hide_console`**。一个没有控制台的父进程去启动控制台程序时，Windows 会**给子进程新开一个控制台窗口**：发布流水线的 `git`（每次都闪一下）与 `pnpm build`（`pnpm.cmd` 实为 `cmd.exe` → `node.exe`，黑窗整段构建都挂着）。`core/src/process.rs` 里三处 `Command`（`spawn_streaming`、`run_collect`、`kill_tree` 的 `taskkill`）都加了 `CREATE_NO_WINDOW`；实测该标志连**孙进程**也覆盖（GUI 父进程 + 无标志 → 出现新控制台窗口；+ 标志 → 直接子进程与嵌套子进程都不出现）。新增 spawn 时别漏。
-- **`astro dev` 预览服务器必须显式收掉，且钩子只有 `on_window_closed` 可用**：「真实预览」起的 `pnpm dev` 是一个 `node` 进程，占着端口 4321，不清理会一直留着。它挂的钩子是 `Window`/`App` 的 `on_window_closed`（关窗时用 `taskkill /T` 收整棵树）；**不要指望 `on_app_quit`**——本版 gpui 只由 `App::shutdown()` 运行那些回调，而关窗路径走不到它（实测：探针写在 `on_app_quit` 里，进程退出了、探针从未生成）。已知缺口：**强杀进程（任务管理器 / `Stop-Process -Force`）仍会留下这个 node**，只有 Windows job object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）能覆盖那种情况，目前没做。
+- **`astro dev` 预览服务器必须显式收掉，且钩子只有 `on_window_closed` 可用**：「真实预览」起的 `pnpm dev` 是一个 `node` 进程，占着端口 4321，不清理会一直留着。它挂的钩子是 `Window`/`App` 的 `on_window_closed`（关窗时用 `taskkill /T` 收整棵树）；**不要指望 `on_app_quit`**——本版 gpui 只由 `App::shutdown()` 运行那些回调，而关窗路径走不到它（实测：探针写在 `on_app_quit` 里，进程退出了、探针从未生成）。
+- **强杀进程靠 job object，不再靠钩子**：上面那条钩子只覆盖「正常关窗」。任务管理器 / `Stop-Process -Force` 根本不会走到任何回调，那时 `node` 会留下并继续占着 4321。`core/src/job.rs` 建了一个带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job object，`process.rs` 的**每一个** spawn 成功后都把子进程 pid 交给 `job::adopt(pid)`，句柄随应用进程一起消失，内核随即杀掉整棵 job。实测：起 `node dev.js` 后 `Stop-Process -Force` 应用，`node` 立刻消失（同时另外 8 个无关 `node` 照常运行，说明不是误杀）。**新增 spawn 站点时别漏掉 `job::adopt`**——CLI 与 MCP 不装 job（`job::install()` 只在 GUI 的 `main` 里调用），所以对它们是空操作。
+- **`Command::output()` 有两个隐含行为，手写 `spawn()` 后必须自己补**：`run_collect` 为了拿 pid 好交给 job object，改成 `spawn()` + `wait_with_output()`。但 `output()` 顺手做了两件事——把 stdout/stderr 接到管道、把 stdin 设成 null——漏掉任何一件就会出静默故障：**stdin** 漏掉会让 `git` 在 GUI 进程（没有控制台）下卡在读密码上；**管道**漏掉更隐蔽，子进程的输出直接写进应用不存在的控制台，调用方拿到空字符串，于是 `git status` 看起来像「工作区干净」、`rev-parse --abbrev-ref` 读不到分支、发布直接废掉。现在 `run_collect` 里显式写了 `stdin/stdout/stderr` 三行，并有单测 `run_collect_returns_what_the_child_printed` 盯着。
+- **gpui 的对话框是窗口内的覆盖层，不是独立 HWND**：`open_alert_dialog` 弹出的东西画在窗口里，截图/自动化要抓那个窗口本身；按 pid 枚举顶层窗口只会看到主窗口一个。「已经在运行」那个提示是另一回事——它用 `MessageBoxW`（原生对话框，独立 HWND，class `#32770`），因为它发生在**窗口创建之前**，那时没有 gpui 窗口可以承载覆盖层；顺带这也是 release 版没有控制台时唯一能让用户看见话的地方（`eprintln!` 会 nowhere）。
 - **服务器就绪不要靠 sleep，要读它自己报的地址**：`pnpm dev` 冷启动实测 ~6.4 秒，所以按钮点了不能立刻开浏览器。就绪信号是那行 `┃ Local    http://localhost:4321/`（**带 ANSI 颜色码**，得先 `process::strip_ansi` 再匹配）；从日志里读端口而不是写死 4321，是因为端口被占时 Astro 会静默换一个，写死就会打开错地址。
+- **在 Windows 上试 Linux 脚本要用 Git Bash，并且把 stdin 断开**：`bash install.sh` 挂在 `rm`/`cp` 之前不动，不是脚本的问题，是它继承了管道里的 stdin、还在等输入。命令行里补 `</dev/null`。另外两点：`[ -e "$prefix/..." ]` 这种测试对 `C:/...` 形式的路径**不成立**（MSYS 只给外部程序做路径转换，`[` 是内建），所以 `--prefix` 要传 `/c/Users/...` 这样的 POSIX 形式；另外 Git Bash 里的 `sudo` 是 Windows 自带的那个，它会**静默拒绝删除点开头的文件**（返回 0、文件还在），所以本机模拟下 `.astro-publisher-install` 卸不掉——Linux 上没这回事。
 - **长时间运行的子进程不要用 `spawn_streaming`**：它会把每一行输出都留在内存里直到进程退出（对 `pnpm build` 是对的，对跑几小时的 dev server 就是无界增长）。长任务用 `spawn_background`，它只转发不累积。
 
 ## 配置
@@ -247,6 +298,35 @@ EV 证书（或已积累信誉的 OV 证书）才能立刻消除 SmartScreen 警
 
 需要本机装有 [NSIS](https://nsis.sourceforge.io/)（`winget install NSIS.NSIS`）。脚本会自动在 PATH 及 NSIS 的标准安装位置找 `makensis`，不必自己加 PATH。脚本里 `Unicode true` 之外，**`.nsi` 文件本身必须是带 BOM 的 UTF-8**，否则含中文的字符串会报 `Bad text encoding`。
 
+## 安装包（Linux / macOS）
+
+Windows 走 NSIS 安装包；Linux 走 **tar.gz + shell 安装器**：
+
+```bash
+# 1) 在 Linux 上构建并组装 tarball（默认输出到 dist/）
+./packaging/linux/build-tarball.sh
+./packaging/linux/build-tarball.sh --out /tmp/dist     # 换个输出目录
+
+# 2) 把 astro-publisher-<版本>-linux.tar.gz 拷到目标机器，解开后
+./install.sh                    # 装到 ~/.local（不需要 root）
+./install.sh --prefix /opt/ap   # 装到指定前缀
+./install.sh --system           # 装到 /usr/local（需要 sudo）
+./install.sh --uninstall        # 卸掉二进制 / 桌面项 / 图标，保留配置
+```
+
+装出来的东西：
+
+- 三个二进制进 `<prefix>/bin/`：`astro-publisher`、`astro-publisher-core`、`astro-publisher-mcp`
+- 图标进 `<prefix>/share/icons/hicolor/scalable/apps/`
+- 桌面项进 `<prefix>/share/applications/astro-publisher.desktop`，`Exec=` 指向一个**同目录生成的 launcher 脚本**，里面写死了绝对路径
+- `<prefix>/bin/.astro-publisher-install` 记录版本与前缀，供人工排查
+
+> 为什么不用 `Exec=astro-publisher`：那样靠 PATH 解析，而桌面会话不读 shell 的 rc 文件——`--prefix` 装到一个不在 PATH 上的目录时，图标点得开却启动不了。launcher 脚本绕开了这层依赖。代价是 `sed` 替换时如果路径里含 `|`，生成的 Exec 会坏（实践中不会）。
+
+**必须在目标机上构建 tarball。** GPUI 不支持从 Windows 交叉编译到 Linux，所以流程是「在 Linux 上跑 `build-tarball.sh`，把 tarball 拷走」——这也是安装器接受目录参数而不是打包格式的原因。
+
+**macOS 目前没有打包脚本。** 代码本身跨平台，但还没有 `.app` 打包 / `dmg` / 公证流程；要装请 `cargo build --release` 后手动放置二进制。
+
 ## 测试
 
 ```bash
@@ -259,11 +339,12 @@ cargo test
 
 ## 状态
 
-已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止）、**MCP server**（供 AI 助手读写博客）、**一键打包脚本**（版本号自动取自 `Cargo.toml`，可选签名）。
+已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练与停止、待提交勾选清单）、**未保存关窗拦截**、**单实例**、**子进程随应用一起被回收**、**MCP server**（供 AI 助手读写博客）、**可配置的章节正文模板**、**无头 CLI 全能力入口**、**一键打包脚本**（Windows 安装包，版本号自动取自 `Cargo.toml`，可选签名；Linux tarball）。
 
 尚在完善：
 
 - 代码签名证书：脚本已接好签名步骤，但证书需要自行向 CA 申请（见「安装包」小节）
+- macOS 打包：只有 Linux 脚本，没有 `.app` / dmg 流程
 - 本章节暂未纳入 `cargo test`：打包脚本本身没有自动化测试，靠手工跑一次验证
 
 最初的实施计划（里程碑 Spike / M0 / M1 / M2、风险表、验收标准）整理在 [`PLAN.md`](PLAN.md)——代码注释里的 `plan §x.y` 引用都指向它。
