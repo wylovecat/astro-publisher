@@ -15,7 +15,8 @@
 use crate::state::{Config, SessionFiles};
 use astro_publisher_core::process::Stream;
 use astro_publisher_core::publish::{
-    self, PublishError, PublishEvent, StepState, StatusChange, STEP_COUNT, STEP_TITLES,
+    self, PublishError, PublishEvent, StepState, StatusChange, STEP_COUNT, STEP_PUSH, STEP_TITLES,
+    STEP_VALIDATE,
 };
 use gpui::prelude::*;
 use gpui::{Context, Entity, IntoElement, Render, Window, div, px};
@@ -56,6 +57,9 @@ pub struct PublishView {
     /// Set by the stop button; the pipeline checks it between steps and kills a
     /// running build.
     cancel: Arc<AtomicBool>,
+    /// The last run's push was rejected because the remote moved on, so the
+    /// panel offers the pull-and-rebase retry.
+    push_rejected: bool,
     notice: String,
 }
 
@@ -100,6 +104,7 @@ impl PublishView {
             log: Vec::new(),
             running: false,
             cancel: Arc::new(AtomicBool::new(false)),
+            push_rejected: false,
             notice: String::new(),
         };
         view.refresh_changes(cx);
@@ -176,7 +181,7 @@ impl PublishView {
                         }
                     })
                     .collect();
-                if self.changes.is_empty() {
+                if self.changes.is_empty() && !self.push_rejected {
                     self.notice = "工作区干净，没有可提交的改动。".to_owned();
                 }
             }
@@ -207,8 +212,44 @@ impl PublishView {
         cx.notify();
     }
 
-    /// Start the pipeline in the background.
+    /// The first step that failed, which is the one a retry has to resume from.
+    ///
+    /// Every failure path in the pipeline marks its step `Failed` before
+    /// returning, so this needs no bookkeeping of its own.
+    fn failed_step(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .position(|row| row.state == StepState::Failed)
+    }
+
+    /// Start the pipeline from the beginning.
     fn start(&mut self, dry_run: bool, cx: &mut Context<Self>) {
+        self.run_pipeline(STEP_VALIDATE, dry_run, false, cx);
+    }
+
+    /// Re-run from `step`, keeping every step before it as it was.
+    fn retry_step(&mut self, step: usize, cx: &mut Context<Self>) {
+        self.run_pipeline(step, false, false, cx);
+    }
+
+    /// Pull the remote's commits by rebasing, then push again — the recovery for
+    /// a rejected push, and the only path in this app that rebases.
+    fn rebase_and_retry(&mut self, cx: &mut Context<Self>) {
+        self.run_pipeline(STEP_PUSH, false, true, cx);
+    }
+
+    /// Start the pipeline in the background.
+    ///
+    /// `start_step` is where to resume (see [`publish::run_from`]) and
+    /// `rebase_first` runs `git pull --rebase` before it. The three public entry
+    /// points above are the only things that choose those.
+    fn run_pipeline(
+        &mut self,
+        start_step: usize,
+        dry_run: bool,
+        rebase_first: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.running {
             return;
         }
@@ -229,10 +270,12 @@ impl PublishView {
             return;
         }
 
+        // A retry resumes after the commit, so the change list is no longer what
+        // is being staged — the empty-selection check would be a false alarm.
         let selected = self.selected_paths();
         // Only worth objecting to when there is something to object about: an
         // untouched working tree is the pipeline's own error to report.
-        if !self.changes.is_empty() && selected.is_empty() {
+        if start_step <= publish::STEP_COMMIT && !self.changes.is_empty() && selected.is_empty() {
             self.notice = "下面一个文件都没勾选，请至少勾选要提交的内容。".to_owned();
             cx.notify();
             return;
@@ -248,12 +291,30 @@ impl PublishView {
             stage_paths: Some(selected),
         };
 
-        self.steps = fresh_steps();
-        self.log.clear();
+        if start_step == STEP_VALIDATE {
+            self.steps = fresh_steps();
+            self.log.clear();
+        } else {
+            // Keep what already succeeded — and the log, which is the only record
+            // of why this retry is happening.
+            for row in self.steps.iter_mut().skip(start_step) {
+                row.state = StepState::Pending;
+                row.detail.clear();
+            }
+            self.log.push((
+                Stream::Stdout,
+                format!("—— 从第 {} 步重新开始 ——", start_step + 1),
+            ));
+        }
+        self.push_rejected = false;
         self.running = true;
         self.cancel = Arc::new(AtomicBool::new(false));
-        self.notice = if dry_run {
+        self.notice = if rebase_first {
+            "先拉取并变基，再重新推送…".to_owned()
+        } else if dry_run {
             "演练中：不提交、不推送".to_owned()
+        } else if start_step > STEP_VALIDATE {
+            format!("从第 {} 步重新开始…", start_step + 1)
         } else {
             "发布中…".to_owned()
         };
@@ -288,15 +349,21 @@ impl PublishView {
             let mut emit = |event: PublishEvent| {
                 let _ = tx.send(event);
             };
-            let result = runtime.block_on(publish::run(&options, cancel, &mut emit));
+
+            if rebase_first {
+                match runtime.block_on(publish::pull_rebase(&options, cancel.clone(), &mut emit)) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        log_failure(&tx, &err);
+                        return;
+                    }
+                }
+            }
+
+            let result = runtime.block_on(publish::run_from(&options, start_step, cancel, &mut emit));
 
             if let Err(err) = result {
-                for line in describe_failure(&err) {
-                    let _ = tx.send(PublishEvent::Log(astro_publisher_core::process::OutputLine {
-                        stream: Stream::Stderr,
-                        text: line,
-                    }));
-                }
+                log_failure(&tx, &err);
             }
         })
         .detach();
@@ -345,6 +412,13 @@ impl PublishView {
                     let overflow = self.log.len() - MAX_LOG_LINES;
                     self.log.drain(0..overflow);
                 }
+            }
+            // The step itself already says "推送失败"; this is what turns that
+            // into an offer of the one recovery that fits.
+            PublishEvent::PushRejected => {
+                self.push_rejected = true;
+                self.notice =
+                    "推送被远端拒绝：远端有你本地没有的提交。可以「拉取并变基后重试」.".to_owned();
             }
             PublishEvent::Finished(summary) => {
                 self.notice = if summary.dry_run {
@@ -502,6 +576,31 @@ impl PublishView {
     }
 
     fn controls(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // A retry only makes sense once a run has stopped, and only for a step
+        // that has work to redo — "托管平台部署" is a notice, not an action.
+        let retry_step = self
+            .failed_step()
+            .filter(|_| !self.running)
+            .filter(|step| *step <= STEP_PUSH);
+        let offers_rebase = !self.running && self.push_rejected;
+
+        let retry: Option<gpui::AnyElement> = retry_step.map(|step| {
+            Button::new("publish-retry")
+                .label(format!("重试第 {} 步", step + 1))
+                .small()
+                .secondary()
+                .on_click(cx.listener(move |this, _, _, cx| this.retry_step(step, cx)))
+                .into_any_element()
+        });
+        let rebase: Option<gpui::AnyElement> = offers_rebase.then(|| {
+            Button::new("publish-rebase")
+                .label("拉取并变基后重试")
+                .small()
+                .secondary()
+                .on_click(cx.listener(|this, _, _, cx| this.rebase_and_retry(cx)))
+                .into_any_element()
+        });
+
         div()
             .flex()
             .flex_row()
@@ -530,6 +629,8 @@ impl PublishView {
                     .danger()
                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
             )
+            .children(retry)
+            .children(rebase)
             .child(
                 Button::new("publish-open-eo")
                     .label("EdgeOne 控制台")
@@ -723,6 +824,30 @@ fn describe_failure(err: &PublishError) -> Vec<String> {
             .iter()
             .map(|finding| format!("[错误] {} — {}", finding.path, finding.message))
             .collect(),
+        // Say what to do about it, then what git said. The recovery button is
+        // right above this text, so name it.
+        PublishError::PushNonFastForward { detail } => {
+            let mut lines = vec![
+                "✗ 推送被拒绝（非快进）：远端有你本地没有的提交。未做任何自动 rebase 或强推。"
+                    .to_owned(),
+                "  可以点「拉取并变基后重试」，或手动 git pull --rebase 后重试。".to_owned(),
+            ];
+            lines.extend(detail.lines().map(str::to_owned));
+            lines
+        }
         other => vec![format!("✗ {other}")],
+    }
+}
+
+/// Report a failure into the event channel, the same way the pipeline reports
+/// everything else.
+fn log_failure(tx: &tokio::sync::mpsc::UnboundedSender<PublishEvent>, err: &PublishError) {
+    for line in describe_failure(err) {
+        let _ = tx.send(PublishEvent::Log(
+            astro_publisher_core::process::OutputLine {
+                stream: Stream::Stderr,
+                text: line,
+            },
+        ));
     }
 }

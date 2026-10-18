@@ -539,6 +539,9 @@ fn cmd_publish(repo: &Path, cli: &Cli) -> Result<ExitCode, String> {
             process::Stream::Stderr => eprintln!("  {}", line.text),
             process::Stream::Stdout => println!("  {}", line.text),
         },
+        // The reason is already in the returned error, with the same wording both
+        // front ends show; the CLI has nothing extra to add to it.
+        publish::PublishEvent::PushRejected => {}
         publish::PublishEvent::Finished(summary) => {
             if summary.pushed {
                 println!(
