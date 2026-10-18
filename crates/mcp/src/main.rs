@@ -596,6 +596,12 @@ impl BlogServer {
                 publish::PublishEvent::Step { index, state, .. } => {
                     format!("步骤 {} {:?}", index + 1, state)
                 }
+                // Worth a line of its own: the assistant can only report the
+                // rejection, since the recovery is an explicit pull-and-rebase
+                // that is deliberately not exposed as a tool.
+                publish::PublishEvent::PushRejected => {
+                    "推送被远端拒绝（非快进）：远端有你本地没有的提交".to_owned()
+                }
                 publish::PublishEvent::Finished(_) => return,
             };
             if let Ok(mut lines) = sink.lock() {
