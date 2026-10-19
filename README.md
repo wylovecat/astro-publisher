@@ -23,6 +23,7 @@
 ```
 ├── Cargo.toml                    # workspace（Cargo.lock 入库以锁定 GPUI 生态版本）
 ├── PLAN.md                       # 最初的实施计划（里程碑 / 风险表 / 验收标准；代码注释里的 plan §x.y 指此）
+├── TODO.md                       # 后续任务（Windows 优先 → 跨平台 → Linux 次之 → 不做 macOS）
 ├── crates/
 │   ├── core/                     # 内容操作库：纯 Rust、无 UI 依赖、可 cargo test
 │   │   ├── src/frontmatter.rs    #   frontmatter 解析 / 只重写围栏区的写回
@@ -265,7 +266,9 @@ pwsh packaging\build-installer.ps1 -SkipBuild   # 复用 target\release，只打
 pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置证书）
 ```
 
-**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名、exe 内嵌的 `FileVersion`、注册表卸载项里显示的版本永远是同一个。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+
+> ⚠️ **装出来的 exe 本身没有版本号**（右键 → 属性 → 详细信息里是空的）。`installer.nsi` 里那几条 `VIAddVersionKey` 装的是**安装器自己**（setup.exe）的版本资源，而 Rust 二进制默认不带版本资源——想让它显示，得给三个 crate 加 `winresource` 之类的 build script 或给链接器传 `/VERSION`，目前没做。所以「这个 exe 是哪一版」只能看安装包文件名或注册表卸载项，不能看 exe 属性。
 
 脚本同时把 `dist/SHA256SUMS.txt` 写成 `<hash>  <文件名>`，供分发的下载方核对。
 
@@ -330,7 +333,7 @@ Windows 走 NSIS 安装包；Linux 走 **tar.gz + shell 安装器**：
 
 **必须在目标机上构建 tarball。** GPUI 不支持从 Windows 交叉编译到 Linux，所以流程是「在 Linux 上跑 `build-tarball.sh`，把 tarball 拷走」——这也是安装器接受目录参数而不是打包格式的原因。
 
-**macOS 目前没有打包脚本。** 代码本身跨平台，但还没有 `.app` 打包 / `dmg` / 公证流程；要装请 `cargo build --release` 后手动放置二进制。
+**macOS 目前没有打包脚本，本项目只做 Windows 与 Linux。** 代码本身跨平台，但还没有 `.app` 打包 / `dmg` / 公证流程，要装请在对应平台 `cargo build --release` 后手动放置二进制。
 
 ## 测试
 
@@ -348,13 +351,19 @@ cargo test
 
 已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练、停止、待提交勾选清单、**失败步骤单独重试与推送冲突的变基重试**）、**未保存关窗拦截**、**单实例**、**子进程随应用一起被回收**、**MCP server**（供 AI 助手读写博客）、**可配置的章节正文模板**、**无头 CLI 全能力入口**、**一键打包脚本**（Windows 安装包，版本号自动取自 `Cargo.toml`，可选签名；Linux tarball）。
 
-尚在完善：
+尚在完善（优先级见 [`TODO.md`](TODO.md)：Windows 优先 → 跨平台 → Linux 次之 → 不做 macOS）：
 
+- **exe 本身没有内嵌版本号**：属性里的版本栏是空的，`VIAddVersionKey` 装的是安装器自己的版本资源；要让 exe 显示版本需另加 build script
 - 代码签名证书：脚本已接好签名步骤，但证书需要自行向 CA 申请（见「安装包」小节）
-- macOS 打包：只有 Linux 脚本，没有 `.app` / dmg 流程
+- 打包 / 安装脚本没有自动化测试，靠手工跑一次验证
+- Linux 上关窗会留下占着端口的 dev server（进程树只在 Windows 上被真正回收）
 - 本章节暂未纳入 `cargo test`：打包脚本本身没有自动化测试，靠手工跑一次验证
 
+已经走通的一条：**安装包在当前代码上装 → 跑 → 卸载全流程验过**（2026-10-19，0.2.0）。三个 exe 的 SHA256 与编译产物逐个一致，卸载后程序目录、注册表卸载项、开始菜单快捷方式全部清理干净，配置按设计保留。
+
 最初的实施计划（里程碑 Spike / M0 / M1 / M2、风险表、验收标准）整理在 [`PLAN.md`](PLAN.md)——代码注释里的 `plan §x.y` 引用都指向它。
+
+还欠着什么、为什么欠，按优先级整理在 [`TODO.md`](TODO.md)——**Windows 优先 → 跨平台 → Linux 次之 → 不做 macOS**。W 档第一条是「安装包从没在当前代码上走通过」，它需要先装 NSIS。
 
 ## 许可
 
