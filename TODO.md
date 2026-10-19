@@ -26,17 +26,25 @@
 
 workspace `Cargo.toml` 的 `version` 从 `0.1.0` 改为 `0.2.0`,三个 crate 继承它,`Cargo.lock` 同步。安装包文件名与注册表卸载项都已是 `0.2.0` / `0.2.0.0`。
 
-### W2b. exe 内嵌版本号是空的 —— README 的说法与实际不符
+### W2b. ~~exe 内嵌版本号是空的~~ —— 已修(2026-10-19)
 
-**这是 W1 验证时发现的**:README 写着「安装包文件名、**exe 内嵌的 FileVersion**、注册表卸载项里显示的版本永远是同一个」,但实测:
+**W1 验证时发现的**:README 写着「安装包文件名、exe 内嵌的 FileVersion、注册表卸载项里显示的版本永远是同一个」,但实测 `VersionInfo.FileVersion` 是空的。
+
+原因在 `packaging/installer.nsi`:那几条 `VIAddVersionKey` 装的是**安装器自己**(setup.exe)的版本资源,不是被安装的 exe;而 Rust 二进制默认不带任何版本资源。
+
+**已修**:三个 crate 各加一个 `build.rs`,用 `winresource` 把版本资源写进 exe,版本取 `CARGO_PKG_VERSION`(仍是 `Cargo.toml` 单一来源)。脚本在 `CARGO_CFG_TARGET_OS != "windows"` 时直接返回,**Linux/macOS 构建不受影响**。
+
+**实测**(装出来的那一份,不是编译产物):
 
 ```
-(Get-Item <安装目录>\astro-publisher.exe).VersionInfo.FileVersion   # 空
+astro-publisher.exe        FileVersion='0.2.0' ProductName='Astro Publisher'
+astro-publisher-core.exe   FileVersion='0.2.0' ProductName='Astro Publisher'
+astro-publisher-mcp.exe    FileVersion='0.2.0' ProductName='Astro Publisher'
 ```
 
-原因在 `packaging/installer.nsi`:那几条 `VIAddVersionKey` 装的是**安装器自己**(setup.exe)的版本资源,不是被安装的 exe;而 Rust 二进制默认不带任何版本资源(没有 `winres` 之类的 build script,也没有给链接器传 `/VERSION`)。所以 Explorer 里右键装出来的那个 exe → 属性 → 详细信息,版本那几栏是空的。
+`FileDescription` 取自各 crate 的 `description`,`CompanyName` = 作者,`LegalCopyright` = MIT。三个 exe 的 SHA256 仍与 `target\release` 逐个一致,程序启动正常(资源是链接期加进去的,所以要真跑一次才算数——已跑)。
 
-**要么改 README 的说法,要么真的把版本打进 exe**(给 app/core/mcp 三个 crate 加 `winresource` build script,或用链接器 flag)。后者要新增依赖,属于独立一次改动,没有擅自做。
+> 踩到的小坑:`winresource` 的 `res.set()` 收 `&str`,直接传 `String` 编译不过,得先 `let` 出来再 `&`。
 
 ### W3. 代码签名 —— 需要你出手
 

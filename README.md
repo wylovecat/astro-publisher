@@ -266,9 +266,9 @@ pwsh packaging\build-installer.ps1 -SkipBuild   # 复用 target\release，只打
 pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置证书）
 ```
 
-**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。而三个 exe 自己的版本资源由各 crate 的 `build.rs` 用 `winresource` 写入，取的也是同一个 `CARGO_PKG_VERSION`——所以右键 → 属性 → 详细信息里能看到 `FileVersion 0.2.0 / ProductName Astro Publisher`。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
 
-> ⚠️ **装出来的 exe 本身没有版本号**（右键 → 属性 → 详细信息里是空的）。`installer.nsi` 里那几条 `VIAddVersionKey` 装的是**安装器自己**（setup.exe）的版本资源，而 Rust 二进制默认不带版本资源——想让它显示，得给三个 crate 加 `winresource` 之类的 build script 或给链接器传 `/VERSION`，目前没做。所以「这个 exe 是哪一版」只能看安装包文件名或注册表卸载项，不能看 exe 属性。
+> 注意 `installer.nsi` 里的 `VIAddVersionKey` 装的是**安装器自己**（setup.exe）的版本资源，跟被安装的 exe 无关。exe 的版本是 `build.rs` 管的；两处别混淆。非 Windows 平台构建时 `build.rs` 直接返回，不引入任何依赖。
 
 脚本同时把 `dist/SHA256SUMS.txt` 写成 `<hash>  <文件名>`，供分发的下载方核对。
 
@@ -353,13 +353,12 @@ cargo test
 
 尚在完善（优先级见 [`TODO.md`](TODO.md)：Windows 优先 → 跨平台 → Linux 次之 → 不做 macOS）：
 
-- **exe 本身没有内嵌版本号**：属性里的版本栏是空的，`VIAddVersionKey` 装的是安装器自己的版本资源；要让 exe 显示版本需另加 build script
 - 代码签名证书：脚本已接好签名步骤，但证书需要自行向 CA 申请（见「安装包」小节）
 - 打包 / 安装脚本没有自动化测试，靠手工跑一次验证
 - Linux 上关窗会留下占着端口的 dev server（进程树只在 Windows 上被真正回收）
 - 本章节暂未纳入 `cargo test`：打包脚本本身没有自动化测试，靠手工跑一次验证
 
-已经走通的一条：**安装包在当前代码上装 → 跑 → 卸载全流程验过**（2026-10-19，0.2.0）。三个 exe 的 SHA256 与编译产物逐个一致，卸载后程序目录、注册表卸载项、开始菜单快捷方式全部清理干净，配置按设计保留。
+已经走通的两条（2026-10-19，0.2.0）：**安装包在当前代码上装 → 跑 → 卸载全流程**，以及**三个 exe 的内嵌版本资源**。三个 exe 的 SHA256 与编译产物逐个一致、装出来的那份属性里能看到 `FileVersion 0.2.0`，卸载后程序目录、注册表卸载项、开始菜单快捷方式全部清理干净，配置按设计保留。
 
 最初的实施计划（里程碑 Spike / M0 / M1 / M2、风险表、验收标准）整理在 [`PLAN.md`](PLAN.md)——代码注释里的 `plan §x.y` 引用都指向它。
 
