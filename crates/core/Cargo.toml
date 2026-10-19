@@ -6,6 +6,9 @@ license.workspace = true
 authors.workspace = true
 description = "Content operations for an Astro blog: frontmatter, course outlines, chapter creation, validation, preview rendering."
 
+[build-dependencies]
+winresource.workspace = true
+
 [dependencies]
 serde.workspace = true
 serde_yaml.workspace = true

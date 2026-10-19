@@ -10,6 +10,9 @@ description = "Desktop publisher for an Astro blog."
 name = "astro-publisher"
 path = "src/main.rs"
 
+[build-dependencies]
+winresource.workspace = true
+
 [dependencies]
 astro-publisher-core = { path = "../core" }
 gpui.workspace = true
