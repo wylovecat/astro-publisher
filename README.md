@@ -270,7 +270,7 @@ pwsh packaging\build-installer.ps1 -SkipBuild   # 复用 target\release，只打
 pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置证书）
 ```
 
-**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。而三个 exe 自己的版本资源由各 crate 的 `build.rs` 用 `winresource` 写入，取的也是同一个 `CARGO_PKG_VERSION`——所以右键 → 属性 → 详细信息里能看到 `FileVersion 0.2.1 / ProductName Astro Publisher`。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。而三个 exe 自己的版本资源由各 crate 的 `build.rs` 用 `winresource` 写入，取的也是同一个 `CARGO_PKG_VERSION`——所以右键 → 属性 → 详细信息里能看到 `FileVersion 0.2.2 / ProductName Astro Publisher`。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
 
 > 注意 `installer.nsi` 里的 `VIAddVersionKey` 装的是**安装器自己**（setup.exe）的版本资源，跟被安装的 exe 无关。exe 的版本是 `build.rs` 管的；两处别混淆。非 Windows 平台构建时 `build.rs` 直接返回，不引入任何依赖。
 

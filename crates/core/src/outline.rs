@@ -244,12 +244,51 @@ fn video_re() -> &'static Regex {
 
 /// First markdown link in `text`, as `(label, href)`.
 fn first_link(text: &str) -> Option<(String, String)> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\[(?P<label>[^\]]*)\]\((?P<href>[^)\s]*)\)").expect("valid link regex")
-    });
-    re.captures(text)
-        .map(|c| (c["label"].to_owned(), c["href"].to_owned()))
+    // A label can contain balanced square brackets: CSP-J titles look like
+    // `[P5660 [CSP-J 2019] 数字游戏](...)`. `\[[^\]]*\]` stops at the title's
+    // closing bracket, so the link is not recognised at all and the entry loses
+    // its title (the problem id still comes from the URL). Walk with a depth
+    // counter instead; Markdown allows balanced brackets in link text.
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].1 != '[' {
+            i += 1;
+            continue;
+        }
+        let start = chars[i].0;
+        let mut depth = 0usize;
+        let mut end = None;
+        let mut j = i;
+        while j < chars.len() {
+            match chars[j].1 {
+                '[' => depth += 1,
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(chars[j].0);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let Some(end) = end else {
+            // No balancing `]` from here on, so no later link either.
+            break;
+        };
+        if let Some(rest) = text[end + 1..].strip_prefix('(') {
+            if let Some(close) = rest.find(')') {
+                let href = &rest[..close];
+                if !href.is_empty() && !href.chars().any(char::is_whitespace) {
+                    return Some((text[start + 1..end].to_owned(), href.to_owned()));
+                }
+            }
+        }
+        i = j + 1;
+    }
+    None
 }
 
 /// Strip markdown emphasis/links so a heading reads as plain text.
@@ -780,6 +819,20 @@ mod edit_tests {
         let path = dir.join("lg-index.md");
         std::fs::write(&path, SAMPLE).expect("write the outline");
         path
+    }
+
+    #[test]
+    fn balanced_brackets_in_a_title_do_not_hide_it() {
+        let line = "## 1. 测试\n- [ ] [P5660 [CSP-J 2019] 数字游戏](https://www.luogu.com.cn/problem/P5660) 📖题解 📺视频";
+        let outline = Outline::parse(line, Path::new("csp-j2-index.md"));
+        let entry = &outline.entries[0];
+
+        assert_eq!(entry.problem_id.as_deref(), Some("P5660"));
+        assert_eq!(
+            entry.title, "[CSP-J 2019] 数字游戏",
+            "the full label survives its nested brackets"
+        );
+        assert_eq!(outline.unwritten()[0].title, "[CSP-J 2019] 数字游戏");
     }
 
     #[test]
