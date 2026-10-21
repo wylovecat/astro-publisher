@@ -7,6 +7,7 @@
 //! astro-publisher-core check       [--repo <path>]
 //! astro-publisher-core books       [--repo <path>]
 //! astro-publisher-core posts       [--repo <path>] [--drafts]
+//! astro-publisher-core new-book    --id <id> --title <t> [--index <group/name>] [--description <d>] [--no-outline]
 //! astro-publisher-core new-post    --title <t> --group <dir> --file-name <name> [--tag <t>]... [--draft]
 //! astro-publisher-core new-chapter --book <id> --section <s> --problem <P1001> --title <t> [--video <url>]
 //! astro-publisher-core link-solution --book <id> --problem <P1001> --post <url> [--section <s>]
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&blog),
         "books" => cmd_books(&repo),
         "posts" => cmd_posts(&blog, parsed.drafts),
+        "new-book" => cmd_new_book(&repo, &parsed),
         "new-post" => cmd_new_post(&blog, &parsed),
         "new-chapter" => cmd_new_chapter(&repo, &blog, &parsed),
         "link-solution" => cmd_link_solution(&repo, &blog, &parsed),
@@ -91,6 +93,7 @@ fn print_usage() {
          \x20 check         校验全部文章的 frontmatter 与大纲链接\n\
          \x20 books         列出 books.json 中登记的书籍\n\
          \x20 posts         列出文章（--drafts 含草稿）\n\
+         \x20 new-book      登记新书并生成大纲骨架\n\
          \x20 new-post      新建普通文章\n\
          \x20 new-chapter   新建课程章节并同步大纲\n\
          \x20 link-solution 给大纲某题关联题解（📖）\n\
@@ -109,6 +112,16 @@ fn print_usage() {
          \x20 --clear <which> unlink 清哪个：solution / video / both（默认 both）\n\
          \x20 --on | --off    set-check 勾选 / 取消勾选\n\
          \n\
+         new-book 选项:\n\
+         \x20 --id <id>       书 id（站内 URL 段，只允许字母/数字/-/_）\n\
+         \x20 --title <t>     书名\n\
+         \x20 --subtitle <s>  副标题\n\
+         \x20 --description <d> 简介（默认用书名）\n\
+         \x20 --index <a/b>  大纲 id，默认 <id>/<id>-index\n\
+         \x20 --author <a>    大纲 frontmatter 的作者（默认取配置）\n\
+         \x20 --cover-class <c> 站点封面样式类\n\
+         \x20 --no-outline    只登记，不生成大纲（大纲必须已存在）\n\
+         \n\
          publish 选项:\n\
          \x20 --stage <path> 只暂存指定路径（可重复）；不给则暂存全部改动\n\
          \x20 --no-build    跳过本地 pnpm build\n\
@@ -123,7 +136,14 @@ fn print_usage() {
 #[derive(Debug, Default, Clone)]
 struct Cli {
     repo: Option<PathBuf>,
+    id: Option<String>,
     title: Option<String>,
+    subtitle: Option<String>,
+    description: Option<String>,
+    index_id: Option<String>,
+    cover_class: Option<String>,
+    author: Option<String>,
+    no_outline: bool,
     group: Option<String>,
     file_name: Option<String>,
     tags: Vec<String>,
@@ -166,7 +186,14 @@ impl Cli {
 
             match arg {
                 "--repo" => cli.repo = Some(PathBuf::from(take_value("--repo")?)),
+                "--id" => cli.id = Some(take_value("--id")?),
                 "--title" => cli.title = Some(take_value("--title")?),
+                "--subtitle" => cli.subtitle = Some(take_value("--subtitle")?),
+                "--description" => cli.description = Some(take_value("--description")?),
+                "--index" => cli.index_id = Some(take_value("--index")?),
+                "--cover-class" => cli.cover_class = Some(take_value("--cover-class")?),
+                "--author" => cli.author = Some(take_value("--author")?),
+                "--no-outline" => cli.no_outline = true,
                 "--group" => cli.group = Some(take_value("--group")?),
                 "--file-name" => cli.file_name = Some(take_value("--file-name")?),
                 "--tag" => cli.tags.push(take_value("--tag")?),
@@ -243,6 +270,59 @@ fn cmd_books(repo: &Path) -> Result<ExitCode, String> {
             println!("    副标题: {sub}");
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Register a new book. The default is the full path: `books.json` plus a
+/// generated outline post, so the wizard has something to point at immediately.
+fn cmd_new_book(repo: &Path, cli: &Cli) -> Result<ExitCode, String> {
+    let id = cli
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or("new-book 需要 --id <id>")?;
+    let title = cli
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or("new-book 需要 --title <书名>")?;
+
+    let index_id = cli
+        .index_id
+        .clone()
+        .unwrap_or_else(|| format!("{id}/{id}-index"));
+    let author = cli
+        .author
+        .clone()
+        .unwrap_or_else(|| astro_publisher_core::config::Config::load().author);
+
+    let outcome = books::create_book(
+        repo,
+        &books::NewBook {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            subtitle: cli.subtitle.clone(),
+            description: cli.description.clone().unwrap_or_else(|| title.to_owned()),
+            index_id,
+            cover_class: cli.cover_class.clone(),
+            author,
+            create_outline: !cli.no_outline,
+        },
+    )
+    .map_err(|err| err.to_string())?;
+
+    println!("✓ 已登记书籍 {} — {}", outcome.book.id, outcome.book.title);
+    println!("    大纲: {}", outcome.outline_path.display());
+    println!(
+        "    {}",
+        if outcome.created_outline {
+            "已生成骨架（含「## 第一章」，可直接去「新建章节」）"
+        } else {
+            "已使用现有大纲，未改动该文件"
+        }
+    );
     Ok(ExitCode::SUCCESS)
 }
 

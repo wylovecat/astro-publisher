@@ -26,7 +26,11 @@ description = "Desktop publisher for Astro blogs: write posts, create book chapt
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 # Platform bootstrap (`application()`): the window/GPU backend entry point that
 # matches the gpui snapshot above.
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }
+# `x11` / `wayland` are *not* default features of `gpui-pre-platform`: without
+# them `gpui_linux` compiles no display backend and `application()` silently
+# starts headless -- the process stays alive with no window and no error. Without
+# these two, the Linux build looks installed and simply never shows anything.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["x11", "wayland"] }
 # Markdown syntax highlighting for the code editor (`tree-sitter-markdown`).
 # Only the languages this tool actually edits are enabled, to keep compile
 # times down (plan §10).

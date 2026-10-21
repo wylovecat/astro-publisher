@@ -22,7 +22,11 @@
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-prefix="${XDG_DATA_HOME:-$HOME/.local}"
+# $HOME/.local, not $XDG_DATA_HOME: the binaries go to <prefix>/bin, and
+# XDG_DATA_HOME already points at ~/.local/share -- using it would install to
+# ~/.local/share/bin, which is not on PATH. The desktop entries below still
+# land under <prefix>/share, which is the same place either way.
+prefix="$HOME/.local"
 system=0
 uninstall=0
 
@@ -44,8 +48,13 @@ desktop_file="$apps_dir/astro-publisher.desktop"
 launcher="$prefix/share/applications/astro-publisher-launcher.sh"
 manifest="$bin_dir/.astro-publisher-install"
 
+# Only `--system` needs root. The default install writes to $HOME/.local, which
+# the user already owns: calling sudo for it prompts for a password that solves
+# nothing and leaves root-owned files inside the user's home.
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif [ "$system" -eq 0 ]; then
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
@@ -121,7 +130,7 @@ cat <<EOF
 astro-publisher $version installed.
 
   desktop entry : $desktop_file
-  config        : \${XDG_CONFIG_HOME:-\$HOME/.config}/astro-publisher/astro-publisher/config.toml
+  config        : \${XDG_CONFIG_HOME:-\$HOME/.config}/astro-publisher/config.toml
 
 If this was a --prefix or --system install and '$bin_dir' is not already on
 PATH, add it:

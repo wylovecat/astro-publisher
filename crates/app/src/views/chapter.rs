@@ -177,6 +177,33 @@ impl ChapterWizard {
         self.refresh_preview(cx);
     }
 
+    /// Re-read `books.json` and every outline, keeping the current selection
+    /// when it still exists. Called after Settings adds a book, so the new one
+    /// is selectable without restarting the app.
+    pub fn reload_books(&mut self, cx: &mut Context<Self>) {
+        let previous_book = self
+            .selected
+            .and_then(|index| self.books.get(index))
+            .map(|choice| choice.book.id.clone());
+        let previous_section = self.section_text();
+
+        self.books = load_books(&self.config);
+        self.selected = previous_book
+            .and_then(|id| self.books.iter().position(|choice| choice.book.id == id))
+            .or_else(|| (!self.books.is_empty()).then_some(0));
+
+        self.section_index = match self.selected {
+            Some(index) => {
+                let sections = &self.books[index].sections;
+                previous_section
+                    .and_then(|text| sections.iter().position(|section| section == &text))
+                    .or_else(|| (!sections.is_empty()).then_some(0))
+            }
+            None => None,
+        };
+        self.refresh_preview(cx);
+    }
+
     /// Look the problem up on Luogu and fill the title field with its name.
     ///
     /// The lookup is a network round trip, so it runs off the UI thread; writing

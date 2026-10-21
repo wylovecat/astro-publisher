@@ -92,6 +92,7 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 | `check` | 校验全部文章的 frontmatter 与大纲链接（错误阻塞发布，警告不阻塞） |
 | `books` | 列出 `books.json` 中登记的书籍 |
 | `posts` | 列出文章（`--drafts` 含草稿） |
+| `new-book` | **登记新书**：`--id <id> --title <书名> [--index <group/name>] [--subtitle s] [--description d] [--author a] [--no-outline]`；默认同时生成大纲骨架 |
 | `new-post` | 新建普通文章：`--title --group <dir> --file-name <name> [--tag t]... [--draft]` |
 | `new-chapter` | **新建课程章节**：`--book <id> --section "<小节>" --problem <P1001> --title <题目名> [--video <url>]` |
 | `link-solution` | 给大纲里某一行补题解链接：`--book <id> --problem <P1001> --post <group/name>` |
@@ -108,6 +109,8 @@ cargo run -p astro-publisher-core -- preview --file /path/to/blog/src/data/blog/
 `unlink` 用 `--clear` 而不是 `--video` 之类的布尔开关，是为了不和 `new-chapter --video <url>` 的既有语义撞车。
 
 ## 应用内操作
+
+- **新增书籍**（设置页）：「书籍」区列出 `books.json` 里已有的书及其大纲小节/题目数；下方表单填 id、书名、简介等，创建时写入 `books.json` 并生成一份大纲目录页（frontmatter 与「## 第一章」骨架），建完即可在「新建章节」里选到。大纲已存在时用 CLI 的 `new-book --no-outline` 只登记，不覆盖文件。
 
 - **新增章节**（侧边栏）：选书 → 选小节 → 填题号 → 点「抓取」自动取回题目名（可手动改）→ 填视频链接 → 「将执行的操作」实时显示确切的 slug、章节文件路径与改写后的大纲行 → 点「创建章节」。勾选框控制 `[x]` 是否跟随题解（基础篇用勾选表示进度，进阶篇用视频标记）。
 - **编辑文章**：源码 + 实时预览并排。预览走 gpui-component 的 Markdown 引擎：代码块按代码块画（等宽、缩进保留、背景与右上角语言标签），行内代码带底色。编辑器里 **Ctrl+V 粘贴截图**会写入仓库 `public/images/`，并在光标处插入 `![](/images/<文章名>-<时间戳>.png)`；写入失败会报原因而不是把二进制当文本贴进去。非图片的剪贴板内容照旧走普通文本粘贴。
@@ -249,7 +252,7 @@ cargo build -p astro-publisher-mcp
 | 平台 | 路径 |
 | --- | --- |
 | Windows | `%APPDATA%\astro-publisher\astro-publisher\config\config.toml` |
-| Linux | `~/.config/astro-publisher/astro-publisher/config.toml` |
+| Linux | `~/.config/astro-publisher/config.toml` |
 | macOS | `~/Library/Application Support/dev.astro-publisher.astro-publisher/config.toml` |
 
 （具体位置以应用「设置」页显示为准——那里直接打印当前生效的路径。）
@@ -349,7 +352,7 @@ cargo test
 
 ## 状态
 
-已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、大纲解析与校验、**一键发布与日志面板**（含演练、停止、待提交勾选清单、**失败步骤单独重试与推送冲突的变基重试**）、**未保存关窗拦截**、**单实例**、**子进程随应用一起被回收**、**MCP server**（供 AI 助手读写博客）、**可配置的章节正文模板**、**无头 CLI 全能力入口**、**一键打包脚本**（Windows 安装包，版本号自动取自 `Cargo.toml`，可选签名；Linux tarball）。
+已经可用：**总览页**（书籍进度 / 未关联题解 / 校验计数 / 最近修改）、文章编辑与预览（含**截图粘贴上传**与**真实预览**：起 `pnpm dev` 用浏览器看站点本体）、**新增章节向导**（含洛谷题目信息抓取）、**设置页书籍管理**（登记新书并生成大纲骨架）、大纲解析与校验、**一键发布与日志面板**（含演练、停止、待提交勾选清单、**失败步骤单独重试与推送冲突的变基重试**）、**未保存关窗拦截**、**单实例**、**子进程随应用一起被回收**、**MCP server**（供 AI 助手读写博客）、**可配置的章节正文模板**、**无头 CLI 全能力入口**、**一键打包脚本**（Windows 安装包，版本号自动取自 `Cargo.toml`，可选签名；Linux tarball）。
 
 尚在完善（优先级见 [`TODO.md`](TODO.md)：Windows 优先 → 跨平台 → Linux 次之 → 不做 macOS）：
 

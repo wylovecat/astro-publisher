@@ -132,6 +132,13 @@ impl OutlineView {
         cx.notify();
     }
 
+    /// Re-read the book registry and outlines. Called when Settings adds a
+    /// book; creations in flight are keyed by (book id, line), so they simply
+    /// drop out of the rows that no longer exist.
+    pub fn reload_books(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
+    }
+
     fn row_state(&self, book_id: &str, line: usize) -> RowState {
         let key = (book_id.to_owned(), line);
         if self.busy.contains(&key) {

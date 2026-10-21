@@ -62,6 +62,9 @@ pub struct PublisherApp {
     live_preview: Option<Entity<live_preview::LivePreview>>,
     /// Repository-path field on the settings page.
     repo_input: Option<Entity<gpui_component::input::InputState>>,
+    /// Add-book form on the settings page. Kept for the same reason as the
+    /// other cached entities: typing survives a page switch.
+    pub book_form: Option<views::settings::BookForm>,
     /// Search field on the post page. Its text filters the list.
     search_input: Entity<InputState>,
     notice: Option<String>,
@@ -98,6 +101,7 @@ impl PublisherApp {
             publish_panel: None,
             live_preview: None,
             repo_input: None,
+            book_form: None,
             search_input,
             notice: None,
         };
@@ -559,6 +563,14 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
+                // Nothing sets these by default on X11: the window appears with
+                // an empty WM_NAME / WM_CLASS, so the taskbar entry reads
+                // "N/A N/A", Alt-Tab shows no label, and the desktop entry's
+                // StartupWMClass cannot match it. The in-app title bar is drawn
+                // by gpui-component and is unaffected.
+                window.set_window_title("astro-publisher");
+                window.set_app_id("astro-publisher");
+
                 let app = cx.new(|cx| {
                     let mut app = PublisherApp::new(config.clone(), window, cx);
                     if let Some(view) = start_view {

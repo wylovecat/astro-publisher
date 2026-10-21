@@ -55,8 +55,17 @@ stage="$out_dir/$name-$version-linux"
 # and it looks exactly like success.
 for binary in astro-publisher astro-publisher-core astro-publisher-mcp; do
   built="$bin_dir/$binary"
-  if [ -n "$(find "$repo_root/crates" "$repo_root/Cargo.toml" -newer "$built" -print -quit 2>/dev/null)" ]; then
-    echo "refusing to package: $binary is older than the source tree" >&2
+  # Only this binary's own crate (plus the workspace manifests) can make it
+  # stale. Comparing against the whole crates/ tree means editing the GUI makes
+  # the untouched CLI look stale, and Cargo correctly does not rebuild it -- so
+  # the check would refuse to package every time after a single-crate change.
+  case "$binary" in
+    astro-publisher) crate="$repo_root/crates/app" ;;
+    astro-publisher-core) crate="$repo_root/crates/core" ;;
+    astro-publisher-mcp) crate="$repo_root/crates/mcp" ;;
+  esac
+  if [ -n "$(find "$crate" "$repo_root/Cargo.toml" "$repo_root/Cargo.lock" -newer "$built" -print -quit 2>/dev/null)" ]; then
+    echo "refusing to package: $binary is older than its source tree" >&2
     exit 1
   fi
 done
