@@ -195,6 +195,53 @@ fn inserts_a_line_when_the_problem_is_not_in_the_outline() {
 }
 
 #[test]
+fn outline_links_use_the_site_slugified_group() {
+    let scratch = Scratch::new();
+    // A book whose directory has a letter/digit boundary: the site's getPath
+    // runs directories through lodash kebabCase, so `csp-j2` publishes under
+    // `/posts/csp-j-2/`, not under the raw directory name.
+    std::fs::create_dir_all(scratch.blog.join("csp-j2")).expect("create group dir");
+    std::fs::copy(
+        scratch.blog.join("group/group-index.md"),
+        scratch.blog.join("csp-j2/csp-j2-index.md"),
+    )
+    .expect("copy outline");
+
+    let book = Book {
+        id: "csp-j2".into(),
+        title: "《CSP-J2》".into(),
+        subtitle: None,
+        description: "d".into(),
+        index_id: "csp-j2/csp-j2-index".into(),
+        cover_class: None,
+    };
+    let input = NewChapter {
+        problem_id: "P9999".into(),
+        title: "数字游戏".into(),
+        section: "2.3 综合练习".into(),
+        video_url: None,
+        author: "Example Author".into(),
+        check_implies_solution: true,
+    };
+
+    let outcome =
+        create_chapter(&scratch.blog, &book.as_book_ref(), &input, None).expect("create chapter");
+    assert!(
+        outcome.outline_after.contains("/posts/csp-j-2/"),
+        "link must use the site's slugified directory: {}",
+        outcome.outline_after
+    );
+    assert!(!outcome.outline_after.contains("/posts/csp-j2/"));
+    // The file itself still lives under the real directory name.
+    assert_eq!(
+        outcome.chapter_path,
+        scratch.blog.join("csp-j2/lg-P9999.md")
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch.root);
+}
+
+#[test]
 fn refuses_to_overwrite_an_existing_chapter() {
     let scratch = Scratch::new();
     let book = Scratch::basic_book();

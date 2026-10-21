@@ -46,7 +46,7 @@ impl Post {
         let mut segments: Vec<String> = Vec::new();
         if let Some(group) = &self.group {
             if !group.starts_with('_') {
-                segments.push(slugify(group));
+                segments.push(site_group_segment(group));
             }
         }
 
@@ -91,6 +91,54 @@ fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+/// Slugify a directory segment exactly the way the site does.
+///
+/// `src/utils/getPath.ts` runs every directory segment through
+/// `slugifyStr`, which is lodash's `kebabCase`. That is not the same as the
+/// simpler [`slugify`] used for the last URL segment: kebabCase treats a
+/// letter/digit boundary and underscores as word breaks, so `csp-j2` becomes
+/// `csp-j-2` and `csp_j2` becomes `csp-j-2`. Using the raw directory name
+/// produces links (and live-preview URLs) the site never serves.
+pub fn site_group_segment(group: &str) -> String {
+    let chars: Vec<char> = group.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if !ch.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+
+        let prev = index.checked_sub(1).map(|i| chars[i]);
+        let next = chars.get(index + 1).copied();
+        let boundary = !word.is_empty()
+            && prev.is_some_and(|p| {
+                // letter <-> digit
+                (p.is_numeric() != ch.is_numeric())
+                    // lower -> upper (fooBar)
+                    || (p.is_lowercase() && ch.is_uppercase())
+                    // end of an acronym (XMLHttp -> XML / Http)
+                    || (p.is_uppercase() && ch.is_uppercase() && next.is_some_and(char::is_lowercase))
+            });
+        if boundary {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(ch);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    words
+        .into_iter()
+        .map(|word| word.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Slugify a path segment the way `getPath.ts` does (lowercase, spaces to `-`).
@@ -327,6 +375,34 @@ mod tests {
         assert_eq!(slugify("Solu"), "solu");
         assert_eq!(slugify("lg-P1001"), "lg-p1001");
         assert_eq!(slugify("_0x0001"), "_0x0001");
+    }
+
+    #[test]
+    fn directory_segments_match_lodash_kebab_case() {
+        // Values checked against the site's `lodash.kebabcase` directly.
+        assert_eq!(site_group_segment("csp-j2"), "csp-j-2");
+        assert_eq!(site_group_segment("csp_j2"), "csp-j-2");
+        assert_eq!(site_group_segment("lg-B2600"), "lg-b-2600");
+        assert_eq!(site_group_segment("P5660"), "p-5660");
+        assert_eq!(site_group_segment("fooBar"), "foo-bar");
+        assert_eq!(site_group_segment("XMLHttpRequest"), "xml-http-request");
+        assert_eq!(site_group_segment("lgj"), "lgj");
+        assert_eq!(site_group_segment("深入浅出"), "深入浅出");
+    }
+
+    #[test]
+    fn url_path_slugifies_the_directory_but_not_the_explicit_slug() {
+        let post = Post {
+            path: PathBuf::from("/blog/csp-j2/lg-P5660.md"),
+            relative: "csp-j2/lg-P5660.md".to_owned(),
+            group: Some("csp-j2".to_owned()),
+            frontmatter: Frontmatter {
+                slug: Some("_0x0013".to_owned()),
+                ..Default::default()
+            },
+            body: String::new(),
+        };
+        assert_eq!(post.url_path(), "/posts/csp-j-2/_0x0013");
     }
 
     #[test]

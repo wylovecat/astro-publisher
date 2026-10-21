@@ -178,6 +178,7 @@ GUI 的章节向导、大纲视图、CLI、MCP 四个入口都走同一个 `crea
   - 视频标记：`📺视频`（占位）↔ `📺[视频](<url>)`（已发布）
   - 题号从题目链接的 URL 里提取，不做括号配对（标题可能含全角括号）。
   - `[x]` 勾选的含义可按书配置：演示用的基础篇中「勾选 ⇔ 题解已写」，由工具同步维护；进阶篇用视频标记进度，工具不改其勾选语义。
+- **URL 里的目录段会被站点 slugify**：`getPath.ts` 对每个目录段跑 lodash `kebabCase`，所以 `csp-j2/` 实际发布在 `/posts/csp-j-2/`（字母/数字边界与下划线都会拆成 `-`）。工具生成的大纲链接、「真实预览」和校验都按转换后的段名走；磁盘上的目录仍用原名。
 - **`_0xNNNN` slug 是全站统一序列**，下一个 = 全站最大 + 1。
 - 同一题号在大纲中可出现多次。写操作按「书 + 小节 + 题号」定位到**具体一行**，不做全局替换；题号有歧义时报错并列出候选，要求你指定小节。
 - **粘贴的图片落在 `public/images/`**，文件名是 `<文章名>-<YYYYMMDD-HHMMSS>.<ext>`，正文里用绝对路径 `/images/<文件名>` 引用（`public/` 下的东西站点按根路径提供）。只接受站点能直接服务的扩展名（png/jpg/jpeg/webp/gif/svg/bmp/tiff/ico）。
@@ -269,7 +270,7 @@ pwsh packaging\build-installer.ps1 -SkipBuild   # 复用 target\release，只打
 pwsh packaging\build-installer.ps1 -Sign        # 打包后签名（需已配置证书）
 ```
 
-**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。而三个 exe 自己的版本资源由各 crate 的 `build.rs` 用 `winresource` 写入，取的也是同一个 `CARGO_PKG_VERSION`——所以右键 → 属性 → 详细信息里能看到 `FileVersion 0.2.0 / ProductName Astro Publisher`。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
+**版本号只有一个来源：`Cargo.toml`。** 脚本用 `cargo metadata` 读出解析后的版本（正确处理 workspace 继承），再传给 `makensis`，所以安装包文件名与注册表卸载项里显示的版本永远是同一个。而三个 exe 自己的版本资源由各 crate 的 `build.rs` 用 `winresource` 写入，取的也是同一个 `CARGO_PKG_VERSION`——所以右键 → 属性 → 详细信息里能看到 `FileVersion 0.2.1 / ProductName Astro Publisher`。以前是手工写 `makensis /DAPP_VERSION=0.1.0 …`，和 `Cargo.toml` 各写各的，容易悄悄漂移——现在改 `Cargo.toml` 里的版本再跑脚本即可。
 
 > 注意 `installer.nsi` 里的 `VIAddVersionKey` 装的是**安装器自己**（setup.exe）的版本资源，跟被安装的 exe 无关。exe 的版本是 `build.rs` 管的；两处别混淆。非 Windows 平台构建时 `build.rs` 直接返回，不引入任何依赖。
 

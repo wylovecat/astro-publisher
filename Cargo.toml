@@ -8,7 +8,7 @@ members = ["crates/core", "crates/app", "crates/mcp"]
 # outline writes from the CLI and MCP, configurable chapter templates, the
 # Linux tarball, and the publish step retry -- landed while the number stayed
 # put, so an installer built from stale sources was still called 0.1.0.
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 authors = ["wylovecat"]

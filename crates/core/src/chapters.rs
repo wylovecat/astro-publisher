@@ -241,6 +241,9 @@ pub fn preview_chapter(
     input: &NewChapter,
 ) -> Result<ChapterPreview, ChapterError> {
     let group = book.group();
+    // The site slugifies directory segments (lodash kebabCase), so a book in
+    // `csp-j2/` publishes under `/posts/csp-j-2/`; links must use that form.
+    let url_group = crate::posts::site_group_segment(&group);
     let file_name = format!("lg-{}.md", input.problem_id.trim());
     let chapter_path = blog_dir.join(&group).join(&file_name);
 
@@ -277,7 +280,7 @@ pub fn preview_chapter(
     };
     let solution_marker = Marker::Linked {
         label: "题解".to_owned(),
-        href: format!("/posts/{group}/{next_slug}"),
+        href: format!("/posts/{url_group}/{next_slug}"),
     };
 
     let (entry, before) = match existing {
@@ -346,6 +349,9 @@ pub fn create_chapter(
     body_template: Option<&str>,
 ) -> Result<ChapterOutcome, ChapterError> {
     let group = book.group();
+    // The site slugifies directory segments (lodash kebabCase), so a book in
+    // `csp-j2/` publishes under `/posts/csp-j-2/`; links must use that form.
+    let url_group = crate::posts::site_group_segment(&group);
     let file_name = format!("lg-{}.md", input.problem_id.trim());
     let chapter_path = blog_dir.join(&group).join(&file_name);
 
@@ -381,7 +387,7 @@ pub fn create_chapter(
     // --- Build the outline edit -------------------------------------------------
     let solution_marker = Marker::Linked {
         label: "题解".to_owned(),
-        href: format!("/posts/{group}/{next_slug}"),
+        href: format!("/posts/{url_group}/{next_slug}"),
     };
     let video_marker = match input.video_url.as_deref().map(str::trim) {
         Some(url) if !url.is_empty() => Marker::Linked {
@@ -474,7 +480,7 @@ pub fn create_chapter(
 
     // Re-parse the edited outline and confirm the new link resolves.
     let reparsed = Outline::parse(&outline.render(), &outline_path);
-    let href = format!("/posts/{group}/{next_slug}");
+    let href = format!("/posts/{url_group}/{next_slug}");
     let found = reparsed
         .entries
         .iter()
